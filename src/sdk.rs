@@ -78,11 +78,13 @@ pub struct PrintSnapshot {
     align: String,
     layout: Option<Vec<serde_json::Value>>,
     threshold_image_blank: bool,
+    native: Option<crate::native_labels::NativeLabel>,
+    preserve_template_formatting: bool,
 }
 
 #[cfg(test)]
 pub fn test_snapshot() -> std::sync::Arc<PrintSnapshot> {
-    std::sync::Arc::new(PrintSnapshot { template_base64: String::new(), image: None, width: 9, bold: false, italic: false, underline: false, font: "Segoe UI".into(), align: "Center".into(), layout: None, threshold_image_blank: false })
+    std::sync::Arc::new(PrintSnapshot { template_base64: String::new(), image: None, width: 9, bold: false, italic: false, underline: false, font: "Segoe UI".into(), align: "Center".into(), layout: None, threshold_image_blank: false, native: None, preserve_template_formatting: false })
 }
 
 pub(crate) fn wait_child(mut child: std::process::Child, timeout: std::time::Duration) -> Result<std::process::Output, String> {
@@ -121,22 +123,28 @@ pub fn installed_fonts() -> Result<Vec<String>, String> {
     if fonts.is_empty() { Err("No installed fonts found".into()) } else { Ok(fonts) }
 }
 
-pub fn preview(template: String, text: String, image_path: String, monochrome: bool, cutoff: u8, width: u8, bold: bool, italic: bool, underline: bool, font: String, align: String, objects: Vec<serde_json::Value>, layout: Option<Vec<serde_json::Value>>) -> Result<Preview, String> {
-    let bridge = std::env::current_exe().map_err(|e| e.to_string())?.parent().ok_or("Missing application folder")?.join("sdk").join("DymoBridge.exe");
-    let snapshot = std::sync::Arc::new(make_snapshot(&template, &image_path, monochrome, cutoff, width, bold, italic, underline, font, align, layout)?);
+fn editor_bridge() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Ok(path) = std::env::var("DYMO_TEST_BRIDGE") { return Ok(PathBuf::from(path)); }
+    Ok(std::env::current_exe().map_err(|e| e.to_string())?.parent().ok_or("Missing application folder")?.join("sdk").join("DymoBridge.exe"))
+}
+
+pub fn preview(template: String, text: String, image_path: String, monochrome: bool, cutoff: u8, width: u8, bold: bool, italic: bool, underline: bool, font: String, align: String, objects: Vec<serde_json::Value>, layout: Option<Vec<serde_json::Value>>, native: Option<crate::native_labels::NativeLabel>) -> Result<Preview, String> {
+    let bridge = editor_bridge()?;
+    let snapshot = std::sync::Arc::new(make_snapshot_with_native(&template, &image_path, monochrome, cutoff, width, bold, italic, underline, font, align, layout, native)?);
     preview_snapshot_with_bridge(bridge, snapshot, text, objects, true)
 }
 
 /// Inspect the complete object set without printing, merge explicitly removed
 /// objects, and then produce the only preview eligible for printing. Both
 /// requests use identical frozen template and image bytes.
-pub fn preview_reconciled(template: String, text: String, image_path: String, monochrome: bool, cutoff: u8, width: u8, bold: bool, italic: bool, underline: bool, font: String, align: String, objects: Vec<serde_json::Value>, mut layout: crate::layout_tools::LayoutState, allowed_removals: Vec<String>) -> Result<(crate::layout_tools::LayoutState, Result<Preview, String>), String> {
-    let bridge = std::env::current_exe().map_err(|e| e.to_string())?.parent().ok_or("Missing application folder")?.join("sdk").join("DymoBridge.exe");
-    preview_reconciled_with_bridge(bridge, template, text, image_path, monochrome, cutoff, width, bold, italic, underline, font, align, objects, &mut layout, allowed_removals)
+pub fn preview_reconciled(template: String, text: String, image_path: String, monochrome: bool, cutoff: u8, width: u8, bold: bool, italic: bool, underline: bool, font: String, align: String, objects: Vec<serde_json::Value>, mut layout: crate::layout_tools::LayoutState, allowed_removals: Vec<String>, native: Option<crate::native_labels::NativeLabel>) -> Result<(crate::layout_tools::LayoutState, Result<Preview, String>), String> {
+    let bridge = editor_bridge()?;
+    preview_reconciled_with_bridge(bridge, template, text, image_path, monochrome, cutoff, width, bold, italic, underline, font, align, objects, &mut layout, allowed_removals, native)
 }
 
-fn preview_reconciled_with_bridge(bridge: PathBuf, template: String, text: String, image_path: String, monochrome: bool, cutoff: u8, width: u8, bold: bool, italic: bool, underline: bool, font: String, align: String, objects: Vec<serde_json::Value>, layout: &mut crate::layout_tools::LayoutState, allowed_removals: Vec<String>) -> Result<(crate::layout_tools::LayoutState, Result<Preview, String>), String> {
-    let mut snapshot = make_snapshot(&template, &image_path, monochrome, cutoff, width, bold, italic, underline, font, align, None)?;
+fn preview_reconciled_with_bridge(bridge: PathBuf, template: String, text: String, image_path: String, monochrome: bool, cutoff: u8, width: u8, bold: bool, italic: bool, underline: bool, font: String, align: String, objects: Vec<serde_json::Value>, layout: &mut crate::layout_tools::LayoutState, allowed_removals: Vec<String>, native: Option<crate::native_labels::NativeLabel>) -> Result<(crate::layout_tools::LayoutState, Result<Preview, String>), String> {
+    let mut snapshot = make_snapshot_with_native(&template, &image_path, monochrome, cutoff, width, bold, italic, underline, font, align, None, native)?;
     let inspection = request_snapshot(bridge.clone(), "inspect-layout", &snapshot, text.clone(), 1, objects.clone(), false)?;
     let all = inspection.get("allLayouts").ok_or("The SDK did not provide the complete object list.")?;
     let names: std::collections::HashSet<_> = all.as_array().ok_or("The SDK object list is invalid.")?.iter().filter_map(|item| item["Name"].as_str().map(str::to_lowercase)).collect();
@@ -158,6 +166,12 @@ fn preview_reconciled_with_bridge(bridge: PathBuf, template: String, text: Strin
 fn preview_with_bridge(bridge: PathBuf, template: String, text: String, image_path: String, monochrome: bool, cutoff: u8, width: u8, bold: bool, italic: bool, underline: bool, font: String, align: String, objects: Vec<serde_json::Value>) -> Result<Preview, String> {
     let snapshot = std::sync::Arc::new(make_snapshot(&template, &image_path, monochrome, cutoff, width, bold, italic, underline, font, align, None)?);
     preview_snapshot_with_bridge(bridge, snapshot, text, objects, true)
+}
+
+#[cfg(test)]
+pub(crate) fn native_preview_for_test(bridge: PathBuf, native: crate::native_labels::NativeLabel, text: String) -> Result<Preview, String> {
+    let snapshot = make_snapshot_with_native("missing-original.dymo", "", false, 128, native.width, native.bold, native.italic, native.underline, native.font.clone(), native.align.clone(), None, Some(native))?;
+    preview_snapshot_with_bridge(bridge, std::sync::Arc::new(snapshot), text, Vec::new(), false)
 }
 
 pub fn preview_snapshot(snapshot: std::sync::Arc<PrintSnapshot>, text: String, objects: Vec<serde_json::Value>) -> Result<Preview, String> {
@@ -192,11 +206,7 @@ fn preview_snapshot_with_bridge(bridge: PathBuf, snapshot: std::sync::Arc<PrintS
 
 pub fn print_snapshot(snapshot: &PrintSnapshot, text: String, copies: u16, objects: Vec<serde_json::Value>) -> Result<(), String> {
     let _access = crate::dymo_service::PRINTER_ACCESS.lock().map_err(|_| "Printer access state unavailable.")?;
-    match crate::dymo_service::discover() {
-        Ok((_, true)) => {},
-        Ok((_, false)) => return Err("The 420P is disconnected according to DYMO Connect.".into()),
-        Err(e) => return Err(format!("Cannot verify the 420P: {e}")),
-    }
+    if !usb_present()? { return Err("The 420P USB device is disconnected.".into()); }
     let bridge = std::env::current_exe().map_err(|e| e.to_string())?.parent().ok_or("Missing application folder")?.join("sdk").join("DymoBridge.exe");
     let result = request_snapshot(bridge, "print", snapshot, text, copies, objects, false)?;
     if result["ok"].as_bool() != Some(true) { return Err("DYMO did not confirm the job".into()); }
@@ -206,7 +216,7 @@ pub fn print_snapshot(snapshot: &PrintSnapshot, text: String, copies: u16, objec
 /// Export the exact frozen inputs used by the verified preview, including the
 /// embedded image and SDK-resolved manual positions. This does not print.
 pub fn export_snapshot(snapshot: &PrintSnapshot, text: String, objects: Vec<serde_json::Value>) -> Result<Vec<u8>, String> {
-    let bridge = std::env::current_exe().map_err(|e| e.to_string())?.parent().ok_or("Missing application folder")?.join("sdk").join("DymoBridge.exe");
+    let bridge = editor_bridge()?;
     export_snapshot_with_bridge(bridge, snapshot, text, objects)
 }
 
@@ -219,11 +229,16 @@ fn export_snapshot_with_bridge(bridge: PathBuf, snapshot: &PrintSnapshot, text: 
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn make_snapshot(template: &str, image_path: &str, monochrome: bool, cutoff: u8, width: u8, bold: bool, italic: bool, underline: bool, font: String, align: String, layout: Option<Vec<serde_json::Value>>) -> Result<PrintSnapshot, String> {
+    make_snapshot_with_native(template, image_path, monochrome, cutoff, width, bold, italic, underline, font, align, layout, None)
+}
+
+fn make_snapshot_with_native(template: &str, image_path: &str, monochrome: bool, cutoff: u8, width: u8, bold: bool, italic: bool, underline: bool, font: String, align: String, layout: Option<Vec<serde_json::Value>>, native: Option<crate::native_labels::NativeLabel>) -> Result<PrintSnapshot, String> {
     use std::io::Read;
-    let file = std::fs::File::open(template).map_err(|e| format!("Cannot open template: {e}"))?;
     let mut bytes = Vec::new();
-    file.take(4_194_305).read_to_end(&mut bytes).map_err(|e| format!("Cannot read template: {e}"))?;
+    if let Some(document) = &native { bytes = base64::engine::general_purpose::STANDARD.decode(&document.xml).map_err(|e| e.to_string())?; }
+    else { let file = std::fs::File::open(template).map_err(|e| format!("Cannot open template: {e}"))?; file.take(4_194_305).read_to_end(&mut bytes).map_err(|e| format!("Cannot read template: {e}"))?; }
     if bytes.is_empty() || bytes.len() > 4_194_304 { return Err("Template is empty or larger than 4 MiB.".into()); }
     let template_base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     let mut threshold_image_blank = false;
@@ -234,11 +249,12 @@ fn make_snapshot(template: &str, image_path: &str, monochrome: bool, cutoff: u8,
         image::DynamicImage::ImageRgba8(data).write_to(&mut bytes, image::ImageFormat::Png).map_err(|e| e.to_string())?;
         Some(base64::engine::general_purpose::STANDARD.encode(bytes.into_inner()))
     };
-    Ok(PrintSnapshot { template_base64, image, width, bold, italic, underline, font, align, layout, threshold_image_blank })
+    let preserve_template_formatting = native.as_ref().is_some_and(|n| n.bold == bold && n.italic == italic && n.underline == underline && n.font == font && n.align == align);
+    Ok(PrintSnapshot { template_base64, image, width, bold, italic, underline, font, align, layout, threshold_image_blank, native, preserve_template_formatting })
 }
 
 fn request_snapshot(bridge: PathBuf, action: &str, snapshot: &PrintSnapshot, text: String, copies: u16, objects: Vec<serde_json::Value>, include_design: bool) -> Result<serde_json::Value, String> {
-    let request = serde_json::json!({"action":action, "templateBase64":snapshot.template_base64, "text":text, "image":snapshot.image, "width":snapshot.width, "copies":copies, "bold":snapshot.bold, "italic":snapshot.italic, "underline":snapshot.underline, "font":snapshot.font, "align":snapshot.align, "objects":objects, "includeDesign":include_design, "layout":snapshot.layout});
+    let request = serde_json::json!({"action":action, "templateBase64":snapshot.template_base64, "text":if snapshot.native.as_ref().is_some_and(|n| n.text == text) { None } else { Some(text) }, "nativeTemplate":snapshot.native.is_some(), "preserveTemplateFormatting":snapshot.preserve_template_formatting, "image":snapshot.image, "width":snapshot.width, "copies":copies, "bold":snapshot.bold, "italic":snapshot.italic, "underline":snapshot.underline, "font":snapshot.font, "align":snapshot.align, "objects":objects, "includeDesign":include_design, "layout":snapshot.layout});
     let mut child = Command::new(bridge).creation_flags(0x08000000).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Cannot start DYMO SDK: {e}"))?;
     let mut stdin = child.stdin.take().ok_or("Cannot open SDK input")?;
     let body = request.to_string().into_bytes();
@@ -539,13 +555,13 @@ mod tests {
         layout.move_object(&text_name, 3.005, 0.0).unwrap();
         let before = layout.save_value()["objects"][0].clone();
         let shape = serde_json::json!({"kind":"shape","name":"Extra1","value":"","variant":"Rectangle","xmm":0,"ymm":0,"widthMm":5,"heightMm":5});
-        let (mut added, preview) = preview_reconciled_with_bridge(PathBuf::from(&bridge), template.clone(), "Test".into(), String::new(), false, 128, 9, false, false, false, "Segoe UI".into(), "Center".into(), vec![shape], &mut layout, vec![]).unwrap();
+        let (mut added, preview) = preview_reconciled_with_bridge(PathBuf::from(&bridge), template.clone(), "Test".into(), String::new(), false, 128, 9, false, false, false, "Segoe UI".into(), "Center".into(), vec![shape], &mut layout, vec![], None).unwrap();
         preview.expect("the merged manual layout should render");
         let saved = added.save_value();
         let retained = saved["objects"].as_array().unwrap().iter().find(|item| item["name"] == text_name).unwrap();
         assert_eq!(retained["x"], before["x"]);
         assert!(saved["objects"].as_array().unwrap().iter().any(|item| item["name"] == "Extra1"));
-        let (removed, preview) = preview_reconciled_with_bridge(PathBuf::from(bridge), template, "Test".into(), String::new(), false, 128, 9, false, false, false, "Segoe UI".into(), "Center".into(), vec![], &mut added, vec!["Extra1".into()]).unwrap();
+        let (removed, preview) = preview_reconciled_with_bridge(PathBuf::from(bridge), template, "Test".into(), String::new(), false, 128, 9, false, false, false, "Segoe UI".into(), "Center".into(), vec![], &mut added, vec!["Extra1".into()], None).unwrap();
         preview.expect("the retained manual layout should render after removal");
         assert_eq!(removed.save_value()["objects"][0]["x"], before["x"]);
         assert_eq!(removed.save_value()["objects"].as_array().unwrap().len(), 1);

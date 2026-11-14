@@ -16,9 +16,12 @@ pub enum Action {
     LayoutAlignLabel(crate::layout_tools::Alignment),
     New,
     Open,
+    OpenRecent(usize),
+    ClearRecents,
     Save,
     SaveAs,
     ExportDymo,
+    ConvertDymo,
     Preferences,
     ImportTemplate,
     ImportData,
@@ -106,9 +109,19 @@ pub fn menu_bar(ui: &mut egui::Ui, state: &ToolbarState) -> Option<Action> {
         ui.menu_button("File", |ui| {
             command(ui, "New                 Ctrl+N", true, "", Action::New, &mut action);
             command(ui, "Open…               Ctrl+O", true, "", Action::Open, &mut action);
-            command(ui, "Save                 Ctrl+S", state.can_save, "Open or save a label first.", Action::Save, &mut action);
+            ui.menu_button("Open recent", |ui| {
+                let recent = crate::recents::load();
+                if recent.is_empty() { ui.label("No recent labels"); }
+                for (index, path) in recent.iter().enumerate() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if ui.button(name.as_ref()).on_hover_text(path.display().to_string()).clicked() { action = Some(Action::OpenRecent(index)); ui.close(); }
+                }
+                if !recent.is_empty() { ui.separator(); command(ui, "Clear recent list", true, "", Action::ClearRecents, &mut action); }
+            });
+            command(ui, "Save                 Ctrl+S", state.can_save, "Wait for the current label operation to finish.", Action::Save, &mut action);
             command(ui, "Save as…      Ctrl+Shift+S", true, "", Action::SaveAs, &mut action);
             command(ui, "Export DYMO label…", state.can_export, "Generate a current label preview first.", Action::ExportDymo, &mut action);
+            command(ui, "Convert labels…", true, "", Action::ConvertDymo, &mut action);
             ui.separator();
             command(ui, "Import data…", true, "", Action::ImportData, &mut action);
             command(ui, "Import custom label…", true, "", Action::ImportTemplate, &mut action);

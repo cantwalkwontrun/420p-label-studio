@@ -33,6 +33,7 @@ try
         return;
     }
     DymoSDK.App.Init();
+    if (request.Action == "import-label") { Console.WriteLine(JsonSerializer.Serialize(NativeLabelImport.Read(request.TemplateBase64, request.IncludeDesign))); return; }
     if (request.Action == "device-status")
     {
         Console.WriteLine(JsonSerializer.Serialize(DeviceStatus.Read(), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
@@ -99,12 +100,15 @@ try
         if (textX != null) textX.Value = (x + h + 0.04).ToString(System.Globalization.CultureInfo.InvariantCulture);
         labelObjects.AddFirst(imageObject);
     }
-    foreach (var colour in doc.Descendants("TextObject").SelectMany(t => t.Descendants("FontBrush")).Descendants("Color"))
+    var editableTextObjects = (request.NativeTemplate ? doc.Descendants("TextObject").Take(1) : doc.Descendants("TextObject")).ToArray();
+    if (!request.PreserveTemplateFormatting)
+    {
+    foreach (var colour in editableTextObjects.SelectMany(t => t.Descendants("FontBrush")).Descendants("Color"))
     {
         colour.SetAttributeValue("A", "1"); colour.SetAttributeValue("R", "0"); colour.SetAttributeValue("G", "0"); colour.SetAttributeValue("B", "0");
     }
     if (string.IsNullOrWhiteSpace(request.Font) || request.Font.Length > 128 || request.Font.Any(char.IsControl)) throw new InvalidOperationException("Invalid font");
-    foreach (var font in doc.Descendants("TextObject").SelectMany(t => t.Descendants("FontInfo")))
+    foreach (var font in editableTextObjects.SelectMany(t => t.Descendants("FontInfo")))
     {
         font.Element("IsBold")?.SetValue(request.Bold ? "True" : "False");
         font.Element("IsItalic")?.SetValue(request.Italic ? "True" : "False");
@@ -112,7 +116,8 @@ try
         font.Element("FontName")?.SetValue(request.Font);
     }
     if (request.Align is not ("Left" or "Center" or "Right")) throw new InvalidOperationException("Invalid text alignment");
-    foreach (var alignment in doc.Descendants("TextObject").SelectMany(t => t.DescendantsAndSelf("HorizontalAlignment"))) alignment.SetValue(request.Align);
+    foreach (var alignment in editableTextObjects.SelectMany(t => t.DescendantsAndSelf("HorizontalAlignment"))) alignment.SetValue(request.Align);
+    }
     var label = DymoLabel.LabelSharedInstance;
     label.LoadLabelFromXML(doc.ToString(SaveOptions.DisableFormatting));
     var objects = label.GetLabelObjects().ToList();
@@ -270,7 +275,7 @@ catch (Exception e)
     Environment.ExitCode = 1;
 }
 
-internal sealed record Request(string Action, string? Template, string? Text, int Copies = 1, string? Image = null, int Width = 0, bool Bold = false, bool Italic = false, bool Underline = false, string Font = "Segoe UI", string Align = "Center", FeatureObject[]? Objects = null, string? TemplateBase64 = null, bool IncludeDesign = true, LayoutSpec[]? Layout = null, string? StatusBase64 = null);
+internal sealed record Request(string Action, string? Template, string? Text, int Copies = 1, string? Image = null, int Width = 0, bool Bold = false, bool Italic = false, bool Underline = false, string Font = "Segoe UI", string Align = "Center", FeatureObject[]? Objects = null, string? TemplateBase64 = null, bool IncludeDesign = true, LayoutSpec[]? Layout = null, string? StatusBase64 = null, bool NativeTemplate = false, bool PreserveTemplateFormatting = false);
 
 internal static class DevicePresence
 {
