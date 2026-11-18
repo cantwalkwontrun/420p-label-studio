@@ -2,7 +2,7 @@
 //!
 //! Commands which depend on an independent object model or other unavailable
 //! features stay disabled; their labels are retained to make the gaps clear.
-use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
+use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Vec2};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -216,7 +216,7 @@ pub fn menu_bar(ui: &mut egui::Ui, state: &ToolbarState) -> Option<Action> {
 enum Glyph { Text, Address, Image, Shape, Line, Barcode, Qr, Date, Counter, More }
 
 fn draw_glyph(ui: &egui::Ui, rect: Rect, glyph: Glyph, enabled: bool) {
-    let colour = if enabled { Color32::from_gray(215) } else { Color32::from_gray(105) };
+    let colour = if enabled { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
     let stroke = Stroke::new(1.6, colour);
     let p = ui.painter();
     let c = rect.center();

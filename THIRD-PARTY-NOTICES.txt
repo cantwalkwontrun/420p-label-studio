@@ -2,6 +2,13 @@ Language: en-GB
 
 Third-party notices
 
+The optional FireFly Pro editor colour scheme uses colours from FireFly Pro
+by Ankit Mishra, licensed under Apache License 2.0. The egui mapping was
+created for 420P Label Studio. The project's licence text is available at
+https://github.com/ankitmlive/firefly-theme/blob/master/License.txt and a
+copy of Apache License 2.0 is included in the binary distribution under
+licences/nuget/AWSSDK.Core-3.7.400/LICENSE-APACHE.txt.
+
 This source project references the DYMO Connect SDK, DYMO LabelAPI Windows,
 DYMO CrossPlatform Common Windows (1.6.0) and DYMO NativeAssets (1.6.0.1).
 Blank XML label/object templates use DYMO's SDK format. The direct DYMO

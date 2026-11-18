@@ -18,16 +18,29 @@ pub struct Object {
     pub layer: u64,
 }
 
+/// Match the SDK's allowance for pre-existing intersections in imported artwork.
+pub fn within_native_overlap(snapshot: &Value, first: &str, second: &str, width: f64, height: f64) -> bool {
+    let bounds = |name: &str| {
+        let row = snapshot.as_array()?.iter().find(|row| row["Name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name)))?;
+        let rect = &row["NativeBounds"];
+        Some((rect["Xmm"].as_f64()?, rect["Ymm"].as_f64()?, rect["WidthMm"].as_f64()?, rect["HeightMm"].as_f64()?))
+    };
+    let (Some((ax, ay, aw, ah)), Some((bx, by, bw, bh))) = (bounds(first), bounds(second)) else { return false; };
+    let original_width = (ax + aw).min(bx + bw) - ax.max(bx);
+    let original_height = (ay + ah).min(by + bh) - ay.max(by);
+    original_width > 0.15 && original_height > 0.15 && width <= original_width + 0.15 && height <= original_height + 0.15
+}
+
 #[derive(Clone, Debug)]
 pub struct MoveVisual { pub object: Object, pub x: f64, pub y: f64 }
 
 /// Check a proposed move against SDK-resolved visible objects. The bridge is
 /// still authoritative because the SDK can adjust the resulting geometry.
-pub fn collision_at<'a>(objects: &'a [Object], moving: &Object, x: f64, y: f64, allow: impl Fn(&str, &str) -> bool) -> Option<&'a str> {
+pub fn collision_at<'a>(objects: &'a [Object], moving: &Object, x: f64, y: f64, allow: impl Fn(&str, &str, f64, f64) -> bool) -> Option<&'a str> {
     objects.iter().filter(|other| !other.name.eq_ignore_ascii_case(&moving.name)).find(|other| {
         let overlap_x = (x + moving.width).min(other.x + other.width) - x.max(other.x);
         let overlap_y = (y + moving.height).min(other.y + other.height) - y.max(other.y);
-        overlap_x > 0.15 && overlap_y > 0.15 && !allow(&moving.name, &other.name)
+        overlap_x > 0.15 && overlap_y > 0.15 && !allow(&moving.name, &other.name, overlap_x, overlap_y)
     }).map(|other| other.name.as_str())
 }
 
@@ -70,7 +83,7 @@ impl Surface {
 /// Move pixels from the last SDK preview while the real preview is being
 /// regenerated. The destination is provisional and is never used for print.
 pub fn paint_move(ui: &egui::Ui, surface: Surface, label_rect: Rect, texture: egui::TextureId, paper: Color32, visual: &MoveVisual, objects: &[Object]) {
-    if !surface.valid() || !label_rect.is_positive() || collision_at(objects, &visual.object, visual.object.x, visual.object.y, |_, _| false).is_some() || collision_at(objects, &visual.object, visual.x, visual.y, |_, _| false).is_some() { return; }
+    if !surface.valid() || !label_rect.is_positive() || collision_at(objects, &visual.object, visual.object.x, visual.object.y, |_, _, _, _| false).is_some() || collision_at(objects, &visual.object, visual.x, visual.y, |_, _, _, _| false).is_some() { return; }
     // A rendered border can extend beyond the SDK's geometric rectangle.
     // Include a small screen-space margin when it will not erase a neighbour.
     let exact = surface.object_rect(&visual.object).intersect(label_rect);
@@ -224,9 +237,9 @@ mod tests {
     }
     #[test] fn drop_collision_preserves_touching_and_explicitly_allowed_positions() {
         let objects = vec![object("text", 0.0, 0.0, 0), object("shape", 5.0, 0.0, 1)];
-        assert_eq!(collision_at(&objects, &objects[1], 3.0, 0.0, |_, _| false), Some("text"));
-        assert_eq!(collision_at(&objects, &objects[1], 4.0, 0.0, |_, _| false), None);
-        assert_eq!(collision_at(&objects, &objects[1], 3.0, 0.0, |_, _| true), None);
+        assert_eq!(collision_at(&objects, &objects[1], 3.0, 0.0, |_, _, _, _| false), Some("text"));
+        assert_eq!(collision_at(&objects, &objects[1], 4.0, 0.0, |_, _, _, _| false), None);
+        assert_eq!(collision_at(&objects, &objects[1], 3.0, 0.0, |_, _, _, _| true), None);
     }
     #[test] fn snapping_prefers_nearest_and_clamps_to_canvas() {
         let (x, guide) = snap_axis(10.15, 4.0, 40.0, std::iter::once((14.0, 4.0)), 0.3);

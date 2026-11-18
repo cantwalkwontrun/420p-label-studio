@@ -68,6 +68,9 @@ try {
             DYMO_TEST_TEMPLATE = Join-Path $projectRoot 'sdk-bridge/templates/6mm.dymo'
             DYMO_TEST_IMAGE = $imagePath
         }
+        if (-not $env:DYMO_TEST_NATIVE_DIR) {
+            $fixtureEnvironment['DYMO_TEST_NATIVE_DIR'] = $fixtureEnvironment.DYMO_TEST_TEMPLATE_DIR
+        }
         foreach ($name in $fixtureEnvironment.Keys) {
             $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
             [Environment]::SetEnvironmentVariable($name, $fixtureEnvironment[$name], 'Process')

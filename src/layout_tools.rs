@@ -44,6 +44,7 @@ pub struct Reconciliation {
 pub struct LayoutState {
     manual: bool,
     locked: bool,
+    automatic_selection: Option<String>,
     items: Vec<Item>, // back to front; array position is the SDK layer
     confirm_reset: bool,
     status: String,
@@ -61,7 +62,12 @@ impl LayoutState {
     /// Select exactly one known object without modifying its saved geometry.
     /// Selection is permitted while locked so the user can inspect an object.
     pub fn select_only(&mut self, name: &str) -> bool {
-        if !self.manual || !self.items.iter().any(|item| item.name.eq_ignore_ascii_case(name)) { return false; }
+        if !self.manual {
+            if self.automatic_selection.as_deref() == Some(name) { return false; }
+            self.automatic_selection = Some(name.to_owned());
+            return true;
+        }
+        if !self.items.iter().any(|item| item.name.eq_ignore_ascii_case(name)) { return false; }
         let mut changed = false;
         for item in &mut self.items {
             let selected = item.name.eq_ignore_ascii_case(name);
@@ -71,6 +77,7 @@ impl LayoutState {
         changed
     }
     pub fn selected_names(&self) -> Vec<String> {
+        if !self.manual { return self.automatic_selection.iter().cloned().collect(); }
         self.items.iter().filter(|item| item.selected).map(|item| item.name.clone()).collect()
     }
     pub fn allows_overlap(&self, first: &str, second: &str) -> bool {
@@ -133,7 +140,9 @@ impl LayoutState {
         if self.manual { return Err("Manual layout is already enabled; reset it before replacing its objects.".into()); }
         if self.locked { return Err("Unlock the layout before enabling manual placement.".into()); }
         let mut items = parse_snapshot(snapshot)?;
-        if let Some(first) = items.first_mut() { first.selected = true; }
+        let selected = self.automatic_selection.as_ref().and_then(|name| items.iter().position(|item| item.name.eq_ignore_ascii_case(name))).unwrap_or(0);
+        if let Some(item) = items.get_mut(selected) { item.selected = true; }
+        self.automatic_selection = None;
         self.items = items; self.manual = true; self.confirm_reset = false;
         self.status = "Manual layout enabled. DYMO may adjust the requested positions and sizes.".into();
         Ok(())
@@ -242,7 +251,7 @@ impl LayoutState {
         let mut items = parsed.into_iter().map(|(_, item)| item).collect::<Vec<_>>();
         validate_names(&items)?;
         if let Some(first) = items.first_mut() { first.selected = true; }
-        Ok(Self { manual, locked, items, confirm_reset: false, status: String::new() })
+        Ok(Self { manual, locked, items, ..Default::default() })
     }
 
     /// Change a selected object's layer. Only single-selection ordering is

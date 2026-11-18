@@ -278,9 +278,8 @@ pub fn run(request: Request, cancel: &AtomicBool, notify: impl FnMut(Event), con
 }
 
 fn original_bytes(path: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let mut bytes = Vec::new(); fs::File::open(path).map_err(|e| e.to_string())?.take(8_388_609).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.is_empty() || bytes.len() > 8_388_608 { return Err("The original is empty or exceeds the supported size; it will be kept.".into()); }
+    let bytes = crate::project_io::read_label(path).map_err(|e| format!("Could not verify the original: {e}"))?;
+    if bytes.is_empty() { return Err("The original is empty; it will be kept.".into()); }
     Ok(bytes)
 }
 

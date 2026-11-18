@@ -7,7 +7,11 @@ using DymoSDK.Interfaces;
 // The label is a fresh, per-request in-memory model. An error can occur after
 // mutations; callers must discard the model on failure and never print it.
 internal sealed record LayoutSpec(string Name, double Xmm, double Ymm, double WidthMm, double HeightMm, int Layer, bool AllowOverlap);
-internal sealed record LayoutResolved(string Name, string Kind, double Xmm, double Ymm, double WidthMm, double HeightMm, int Layer, bool IsValid, bool InCanvas);
+internal sealed record LayoutResolved(string Name, string Kind, double Xmm, double Ymm, double WidthMm, double HeightMm, int Layer, bool IsValid, bool InCanvas)
+{
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public LayoutResolved? NativeBounds { get; init; }
+}
 
 internal static class InteractiveLayout
 {
@@ -52,8 +56,8 @@ internal static class InteractiveLayout
     }
 
     // The complete set of objects is required so layer indices are unambiguous.
-    // Overlap is permitted only when both objects explicitly opt in.
-    internal static IReadOnlyList<LayoutResolved> Apply(IDymoLabel label, IReadOnlyList<LayoutSpec> edits, string? emptyPrimaryText = null)
+    // A native template may already contain intentional overlapping artwork.
+    internal static IReadOnlyList<LayoutResolved> Apply(IDymoLabel label, IReadOnlyList<LayoutSpec> edits, string? emptyPrimaryText = null, IReadOnlyDictionary<string, LayoutResolved>? originalNativeLayout = null)
     {
         if (edits.Count is < 1 or > 64) throw new InvalidOperationException("A layout needs 1–64 objects.");
         if (edits.Any(e => e is null || string.IsNullOrWhiteSpace(e.Name))) throw new InvalidOperationException("Every layout object needs a name.");
@@ -126,8 +130,14 @@ internal static class InteractiveLayout
             var a = resolvedByName[edits[i].Name]; var b = resolvedByName[edits[j].Name];
             var overlapX = Math.Min(a.Xmm + a.WidthMm, b.Xmm + b.WidthMm) - Math.Max(a.Xmm, b.Xmm);
             var overlapY = Math.Min(a.Ymm + a.HeightMm, b.Ymm + b.HeightMm) - Math.Max(a.Ymm, b.Ymm);
-            if (overlapX > Tolerance && overlapY > Tolerance && !(edits[i].AllowOverlap && edits[j].AllowOverlap))
-                throw new InvalidOperationException($"'{a.Name}' overlaps '{b.Name}' without explicit permission.");
+            if (overlapX <= Tolerance || overlapY <= Tolerance || (edits[i].AllowOverlap && edits[j].AllowOverlap)) continue;
+            if (originalNativeLayout is not null && originalNativeLayout.TryGetValue(a.Name, out var oldA) && originalNativeLayout.TryGetValue(b.Name, out var oldB))
+            {
+                var originalX = Math.Min(oldA.Xmm + oldA.WidthMm, oldB.Xmm + oldB.WidthMm) - Math.Max(oldA.Xmm, oldB.Xmm);
+                var originalY = Math.Min(oldA.Ymm + oldA.HeightMm, oldB.Ymm + oldB.HeightMm) - Math.Max(oldA.Ymm, oldB.Ymm);
+                if (originalX > Tolerance && originalY > Tolerance && overlapX <= originalX + Tolerance && overlapY <= originalY + Tolerance) continue;
+            }
+            throw new InvalidOperationException($"'{a.Name}' overlaps '{b.Name}' without explicit permission.");
         }
         return actual;
     }

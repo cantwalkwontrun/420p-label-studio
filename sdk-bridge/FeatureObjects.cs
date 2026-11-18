@@ -114,7 +114,9 @@ internal static class FeatureObjects
                 case "qr":
                     if (obj is not QRCodeObject qr) throw new InvalidOperationException("DYMO did not create a QR object.");
                     qr.GenerateDataHolder(EQRCodeType.QRCodeText);
-                    qr.Data.Text = spec.Value!;
+                    if (qr.DataHolder is not TextDataHolder holder)
+                        throw new InvalidOperationException("DYMO could not create the QR text data holder.");
+                    holder.Value.Text = spec.Value!;
                     break;
                 case "line":
                     ((ILineObject)obj).LineType = Enum.Parse<ELineType>(spec.Variant ?? nameof(ELineType.Horizontal));
@@ -141,6 +143,8 @@ internal static class FeatureObjects
             }
             created.Add((spec, obj));
             if (label.GetPreviewLabel() is not { Length: > 0 }) throw new InvalidOperationException($"DYMO could not render object '{spec.Name}'.");
+            if (obj is QRCodeObject renderedQr && renderedQr.Data.Text != spec.Value)
+                throw new InvalidOperationException($"DYMO could not encode the requested QR value for '{spec.Name}'.");
             var interimBounds = model.LayoutBounds;
             cursorMm = model.LayoutManager.LabelObjects.Max(o =>
                 (o.Layout.Rect.Location.X + o.Layout.Rect.Size.Width - interimBounds.Location.X) * MillimetresPerInch);

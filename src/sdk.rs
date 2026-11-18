@@ -168,10 +168,10 @@ fn preview_with_bridge(bridge: PathBuf, template: String, text: String, image_pa
     preview_snapshot_with_bridge(bridge, snapshot, text, objects, true)
 }
 
-#[cfg(test)]
-pub(crate) fn native_preview_for_test(bridge: PathBuf, native: crate::native_labels::NativeLabel, text: String) -> Result<Preview, String> {
-    let snapshot = make_snapshot_with_native("missing-original.dymo", "", false, 128, native.width, native.bold, native.italic, native.underline, native.font.clone(), native.align.clone(), None, Some(native))?;
-    preview_snapshot_with_bridge(bridge, std::sync::Arc::new(snapshot), text, Vec::new(), false)
+pub(crate) fn native_preview(native: crate::native_labels::NativeLabel) -> Result<Preview, String> {
+    let text = native.text.clone();
+    let snapshot = make_snapshot_with_native("", "", false, 128, native.width, native.bold, native.italic, native.underline, native.font.clone(), native.align.clone(), None, Some(native))?;
+    preview_snapshot_with_bridge(editor_bridge()?, std::sync::Arc::new(snapshot), text, Vec::new(), false)
 }
 
 pub fn preview_snapshot(snapshot: std::sync::Arc<PrintSnapshot>, text: String, objects: Vec<serde_json::Value>) -> Result<Preview, String> {
@@ -223,9 +223,9 @@ pub fn export_snapshot(snapshot: &PrintSnapshot, text: String, objects: Vec<serd
 fn export_snapshot_with_bridge(bridge: PathBuf, snapshot: &PrintSnapshot, text: String, objects: Vec<serde_json::Value>) -> Result<Vec<u8>, String> {
     let result = request_snapshot(bridge, "export", snapshot, text, 1, objects, false)?;
     let encoded = result["labelBase64"].as_str().ok_or("Exported label missing from SDK response")?;
-    if encoded.is_empty() || encoded.len() > 22_369_624 { return Err("Exported label is empty or larger than 16 MiB.".into()); }
+    if encoded.is_empty() || encoded.len() > crate::project_io::NATIVE_BASE64_LIMIT { return Err("Exported label is empty or larger than 16 MiB.".into()); }
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|e| format!("Invalid exported label: {e}"))?;
-    if bytes.is_empty() || bytes.len() > 16_777_216 { return Err("Exported label is empty or larger than 16 MiB.".into()); }
+    if bytes.is_empty() || bytes.len() > crate::project_io::NATIVE_LIMIT { return Err("Exported label is empty or larger than 16 MiB.".into()); }
     Ok(bytes)
 }
 
@@ -235,12 +235,14 @@ fn make_snapshot(template: &str, image_path: &str, monochrome: bool, cutoff: u8,
 }
 
 fn make_snapshot_with_native(template: &str, image_path: &str, monochrome: bool, cutoff: u8, width: u8, bold: bool, italic: bool, underline: bool, font: String, align: String, layout: Option<Vec<serde_json::Value>>, native: Option<crate::native_labels::NativeLabel>) -> Result<PrintSnapshot, String> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    if let Some(document) = &native { bytes = base64::engine::general_purpose::STANDARD.decode(&document.xml).map_err(|e| e.to_string())?; }
-    else { let file = std::fs::File::open(template).map_err(|e| format!("Cannot open template: {e}"))?; file.take(4_194_305).read_to_end(&mut bytes).map_err(|e| format!("Cannot read template: {e}"))?; }
-    if bytes.is_empty() || bytes.len() > 4_194_304 { return Err("Template is empty or larger than 4 MiB.".into()); }
-    let template_base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let template_base64 = if let Some(document) = &native {
+        // NativeLabel validated both the decoded size and its base64 on load.
+        document.xml.clone()
+    } else {
+        let bytes = crate::project_io::read_bounded(std::path::Path::new(template), crate::project_io::NATIVE_LIMIT).map_err(|e| format!("Cannot open template: {e}"))?;
+        if bytes.is_empty() { return Err("Template is empty.".into()); }
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    };
     let mut threshold_image_blank = false;
     let image = if image_path.trim().is_empty() { None } else {
         let data = prepare_image(image_path, monochrome, cutoff)?;
@@ -474,6 +476,23 @@ mod tests {
         std::fs::remove_file(image_path).unwrap();
     }
     #[test]
+    fn qr_payload_survives_export_and_changes_the_rendered_code() {
+        let (Ok(bridge), Ok(dir)) = (std::env::var("DYMO_TEST_BRIDGE"), std::env::var("DYMO_TEST_TEMPLATE_DIR")) else { return; };
+        let template = PathBuf::from(dir).join("19mm.dymo");
+        let snapshot = std::sync::Arc::new(make_snapshot(template.to_str().unwrap(), "", true, 128, 19, false, false, false, "Segoe UI".into(), "Center".into(), None).unwrap());
+        let mut images = Vec::new();
+        for value in ["ITEM-A", "https://example.org/asset/B"] {
+            let qr = serde_json::json!({"kind":"qr","name":"Extra1","value":value,"xmm":0,"ymm":0,"widthMm":13,"heightMm":13});
+            let preview = preview_snapshot_with_bridge(bridge.clone().into(), snapshot.clone(), String::new(), vec![qr.clone()], false).unwrap();
+            let xml = String::from_utf8(export_snapshot_with_bridge(bridge.clone().into(), &snapshot, String::new(), vec![qr]).unwrap()).unwrap();
+            assert!(xml.contains(&format!("<DataString>{value}</DataString>")), "encoded QR payload");
+            assert!(xml.contains(&format!("<Value>{value}</Value>")), "editable QR data holder");
+            images.push(preview.image);
+        }
+        assert_ne!(images[0], images[1], "distinct payloads must produce different marks");
+    }
+
+    #[test]
     fn imported_live_dates_and_embedded_counters_are_rejected_when_fixtures_supplied() {
         let (Ok(bridge), Ok(dir)) = (std::env::var("DYMO_TEST_BRIDGE"), std::env::var("DYMO_TEST_TEMPLATE_DIR")) else { return; };
         let template = PathBuf::from(dir).join("9mm.dymo").to_string_lossy().into_owned();
@@ -543,6 +562,47 @@ mod tests {
         assert_eq!(good.all_layouts.unwrap().len(), specs.len());
         let mut invalid = specs; invalid[0]["Name"] = serde_json::json!("UnknownObject");
         assert!(preview_snapshot_with_bridge(PathBuf::from(bridge), make(invalid), "Manual layout".into(), vec![], false).is_err());
+    }
+    #[test]
+    fn native_overlaps_use_the_original_extent_for_both_dragging_and_sdk_validation() {
+        let (Ok(bridge), Ok(dir)) = (std::env::var("DYMO_TEST_BRIDGE"), std::env::var("DYMO_TEST_TEMPLATE_DIR")) else { return; };
+        let template = PathBuf::from(dir).join("9mm.dymo");
+        let mut snapshot = make_snapshot(template.to_str().unwrap(), "", false, 128, 9, false, false, false, "Segoe UI".into(), "Center".into(), None).unwrap();
+        let shape = |name, x| serde_json::json!({"kind":"shape","name":name,"value":"","variant":"Rectangle","xmm":x,"ymm":0,"widthMm":5,"heightMm":5});
+        let objects = vec![shape("Extra1", 0), shape("Extra2", 6)];
+        let auto = request_snapshot(bridge.clone().into(), "inspect-layout", &snapshot, String::new(), 1, objects.clone(), false).unwrap();
+        let mut rows = auto["allLayouts"].as_array().unwrap().clone();
+        for row in &mut rows {
+            if row["Name"] == "Extra1" { row["Xmm"] = 0.0.into(); }
+            if row["Name"] == "Extra2" { row["Xmm"] = 1.5.into(); }
+            row["AllowOverlap"] = true.into();
+        }
+        snapshot.layout = Some(rows);
+        let bytes = export_snapshot_with_bridge(bridge.clone().into(), &snapshot, String::new(), objects).unwrap();
+        let native = crate::native_labels::NativeLabel::from_value(&serde_json::json!({"xml":base64::engine::general_purpose::STANDARD.encode(bytes),
+            "width":9,"text":"","font":"Segoe UI","align":"Center","bold":false,"italic":false,"underline":false})).unwrap();
+        let preview = native_preview(native).unwrap();
+        assert_eq!(preview.empty_primary_text.as_deref(), Some("TextObject0"));
+        let mut imported = (*preview.snapshot).clone();
+        let automatic = serde_json::Value::Array(preview.all_layouts.unwrap());
+        let mut rows = automatic.as_array().unwrap().clone();
+        let second = rows.iter().position(|row| row["Name"] == "Extra2").unwrap();
+        // A separated pair can return to its original overlap, even on a later drag.
+        for (offset, allowed) in [(6.0, true), (1.5, true), (0.1, false)] {
+            rows[second]["Xmm"] = offset.into();
+            imported.layout = Some(rows.clone());
+            let result = request_snapshot(bridge.clone().into(), "preview", &imported, String::new(), 1, vec![], false);
+            assert_eq!(result.is_ok(), allowed, "{offset} mm: {:?}", result.as_ref().err());
+            if offset == 6.0 {
+                let separated = &result.as_ref().unwrap()["allLayouts"];
+                for source in [&automatic, separated] {
+                    assert!(crate::canvas_layout::within_native_overlap(source, "Extra1", "Extra2", 3.5, 5.0));
+                    assert!(!crate::canvas_layout::within_native_overlap(source, "Extra1", "Extra2", 4.9, 5.0));
+                    assert!(!crate::canvas_layout::within_native_overlap(source, "Extra1", "TextObject0", 1.0, 1.0));
+                }
+            }
+            if !allowed { assert!(result.unwrap_err().contains("overlaps")); }
+        }
     }
     #[test]
     fn manual_layout_add_and_remove_preserves_existing_position_when_fixtures_supplied() {

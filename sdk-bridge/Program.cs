@@ -27,18 +27,26 @@ try
         Console.WriteLine(JsonSerializer.Serialize(DeviceStatus.Decode(Convert.FromBase64String(request.StatusBase64)), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
         return;
     }
-    if (request.Action == "device-status" && !DevicePresence.Is420pPresent())
+    if (request.Action == "device-status")
     {
-        Console.WriteLine(JsonSerializer.Serialize(DeviceStatus.Disconnected(), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        var status = DeviceStatus.Disconnected();
+        if (DevicePresence.Is420pPresent())
+        {
+            try
+            {
+                DymoSDK.App.Init();
+                status = DeviceStatus.Read();
+            }
+            catch (Exception)
+            {
+                status = new DeviceStatusResult(true, false, Message: "Printer details are unavailable. Try refreshing the connection.");
+            }
+        }
+        Console.WriteLine(JsonSerializer.Serialize(status, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
         return;
     }
     DymoSDK.App.Init();
     if (request.Action == "import-label") { Console.WriteLine(JsonSerializer.Serialize(NativeLabelImport.Read(request.TemplateBase64, request.IncludeDesign))); return; }
-    if (request.Action == "device-status")
-    {
-        Console.WriteLine(JsonSerializer.Serialize(DeviceStatus.Read(), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
-        return;
-    }
     if (request.Action == "printers")
     {
         var printers = DymoPrinter.Instance.GetPrinters().Where(p => p.Name == "DYMO LabelManager 420P").Select(p => new { p.Name, p.IsConnected }).ToArray();
@@ -51,9 +59,9 @@ try
     XDocument doc;
     if (request.TemplateBase64 is not null)
     {
-        if (request.TemplateBase64.Length == 0 || request.TemplateBase64.Length > 5_592_408) throw new InvalidOperationException("Template snapshot is empty or too large");
+        if (request.TemplateBase64.Length == 0 || request.TemplateBase64.Length > NativeLabelImport.MaximumBase64Length) throw new InvalidOperationException("Template snapshot is empty or too large");
         var templateBytes = Convert.FromBase64String(request.TemplateBase64);
-        if (templateBytes.Length == 0 || templateBytes.Length > 4_194_304) throw new InvalidOperationException("Template snapshot is empty or too large");
+        if (templateBytes.Length == 0 || templateBytes.Length > NativeLabelImport.MaximumBytes) throw new InvalidOperationException("Template snapshot is empty or too large");
         using var templateStream = new MemoryStream(templateBytes, false);
         doc = XDocument.Load(templateStream, LoadOptions.None);
     }
@@ -73,6 +81,19 @@ try
         throw new InvalidOperationException("This template contains a dynamic date/time object. Make it static in DYMO software, or remove it and add date/time in this app before printing.");
     if (doc.Descendants("CounterObject").Any())
         throw new InvalidOperationException("This template contains an embedded counter. Remove it and add a counter in this app so every label can be previewed and checked before printing.");
+    Dictionary<string, LayoutResolved>? originalNativeLayout = null;
+    if (request.NativeTemplate && (request.Layout is not null || request.Action == "preview") &&
+        doc.Descendants("LabelObjects").Elements().Skip(1).Any())
+    {
+        var originalLabel = DymoLabel.LabelSharedInstance;
+        originalLabel.LoadLabelFromXML(doc.ToString(SaveOptions.DisableFormatting));
+        try { originalNativeLayout = InteractiveLayout.Snapshot(originalLabel).ToDictionary(o => o.Name, StringComparer.OrdinalIgnoreCase); }
+        catch (Exception) when (request.Layout is null) { /* Optional for display-only previews. */ }
+        // Empty text boxes can overlap artwork without carrying any printed content.
+        // Typing into one later must still validate the new collision.
+        foreach (var blank in doc.Descendants("TextObject").Where(o => o.Descendants("Text").All(t => string.IsNullOrWhiteSpace(t.Value))))
+            if (blank.Element("Name") is { } blankName) originalNativeLayout?.Remove(blankName.Value);
+    }
     if (request.Text != null && !doc.Descendants("TextObject").Any())
     {
         var labelObjects = doc.Descendants("LabelObjects").FirstOrDefault() ?? throw new InvalidOperationException("Template cannot contain label objects");
@@ -128,6 +149,13 @@ try
         if (!label.UpdateLabelObject(textObject, request.Text)) throw new InvalidOperationException("Unable to update template text");
         if (string.IsNullOrWhiteSpace(request.Text)) emptyPrimaryText = textObject.Name;
     }
+    else if (request.NativeTemplate && editableTextObjects.FirstOrDefault() is { } primary &&
+        primary.Descendants("Text").All(t => string.IsNullOrWhiteSpace(t.Value)))
+    {
+        // An unchanged native label sends no replacement text. Its empty editor
+        // placeholder must still be excluded from hit testing and collisions.
+        emptyPrimaryText = primary.Element("Name")?.Value;
+    }
     if (!string.IsNullOrEmpty(request.Image))
     {
         var imageObject = objects.FirstOrDefault(o => o.Type == TypeObject.ImageObject) ?? throw new InvalidOperationException("Template has no image object");
@@ -157,7 +185,7 @@ try
     {
         // Deferred overlap checking is safe only because Apply validates every
         // object and fails closed before this request can submit a print job.
-        var resolved = InteractiveLayout.Apply(label, request.Layout, emptyPrimaryText);
+        var resolved = InteractiveLayout.Apply(label, request.Layout, emptyPrimaryText, originalNativeLayout);
         foreach (var item in resolved)
         {
             var requested = request.Layout.First(o => string.Equals(o.Name, item.Name, StringComparison.OrdinalIgnoreCase));
@@ -189,7 +217,7 @@ try
         // the resolved model first, and require the exact printer-resolution
         // bitmap before saving. Fail closed if SDK internals change.
         var serializer = typeof(DymoLabel).GetMethod("SerializeLabel", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        if (serializer?.Invoke(label, null) is not string resolvedXml || resolvedXml.Length > 16_777_216)
+        if (serializer?.Invoke(label, null) is not string resolvedXml || resolvedXml.Length > NativeLabelImport.MaximumBytes)
             throw new InvalidOperationException("This SDK cannot export the resolved label safely.");
         var sourceLabel = label as DymoLabel ?? throw new InvalidOperationException("This SDK cannot create an independent export label.");
         var exportLabel = sourceLabel.GetNewLabelInstance();
@@ -206,7 +234,7 @@ try
         {
             if (!exportLabel.Save(path)) throw new InvalidOperationException("DYMO could not export the label.");
             var size = new FileInfo(path).Length;
-            if (size is <= 0 or > 16_777_216) throw new InvalidOperationException("The exported label is empty or larger than 16 MiB.");
+            if (size is <= 0 or > NativeLabelImport.MaximumBytes) throw new InvalidOperationException("The exported label is empty or larger than 16 MiB.");
             var bytes = File.ReadAllBytes(path);
             var restored = sourceLabel.GetNewLabelInstance();
             if (ReferenceEquals(label, restored) || ReferenceEquals(exportLabel, restored)) throw new InvalidOperationException("The SDK could not verify the exported label independently.");
@@ -256,6 +284,8 @@ try
         catch (Exception) { /* The preview remains usable if SDK internals change. */ }
         IReadOnlyList<LayoutResolved>? allLayouts = null;
         try { allLayouts = InteractiveLayout.Snapshot(label); } catch (Exception) { /* Optional for existing labels; manual layout remains unavailable. */ }
+        if (allLayouts is not null && originalNativeLayout is not null)
+            allLayouts = allLayouts.Select(row => row with { NativeBounds = originalNativeLayout.GetValueOrDefault(row.Name) }).ToArray();
         var standardPreview = label.Preview;
         var designPreview = request.IncludeDesign ? HighResolutionPreview.TryRender(label, standardPreview) : null;
         if (designPreview is not null && ((long)standardPreview.Length + designPreview.Length) * 4 / 3 > 30_000_000) designPreview = null;

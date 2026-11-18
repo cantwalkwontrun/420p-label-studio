@@ -6,13 +6,16 @@ using DymoSDK.Implementations;
 
 internal static class NativeLabelImport
 {
+    internal const int MaximumBytes = 16 * 1024 * 1024;
+    internal const int MaximumBase64Length = (MaximumBytes + 2) / 3 * 4;
+
     internal static object Read(string? encoded, bool includeReference)
     {
-        if (encoded is null || encoded.Length is < 1 or > 5_592_408) throw new InvalidOperationException("The DYMO label is empty or larger than 4 MiB.");
+        if (encoded is null || encoded.Length is < 1 or > MaximumBase64Length) throw new InvalidOperationException("The DYMO label is empty or larger than 16 MiB.");
         var bytes = Convert.FromBase64String(encoded);
-        if (bytes.Length is < 1 or > 4_194_304) throw new InvalidOperationException("The DYMO label is empty or larger than 4 MiB.");
+        if (bytes.Length is < 1 or > MaximumBytes) throw new InvalidOperationException("The DYMO label is empty or larger than 16 MiB.");
         using var stream = new MemoryStream(bytes, false);
-        using var reader = XmlReader.Create(stream, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = 8_388_608 });
+        using var reader = XmlReader.Create(stream, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = MaximumBytes });
         var doc = XDocument.Load(reader, LoadOptions.PreserveWhitespace);
         if (doc.Root?.Name.LocalName != "DesktopLabel") throw new InvalidOperationException("This label format is not a DYMO Connect tape label supported by the 420P. Open it in DYMO Connect and save it as .dymo first.");
         var name = doc.Descendants("LabelName").FirstOrDefault()?.Value ?? "";

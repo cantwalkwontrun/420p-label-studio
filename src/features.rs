@@ -45,6 +45,7 @@ pub struct Features {
     objects: Vec<Feature>,
     selected: Option<usize>,
     next_id: u32,
+    reserved_ids: std::collections::HashSet<u32>,
 }
 
 fn printable_height(width_mm: u8) -> Option<f64> {
@@ -201,8 +202,28 @@ impl Features {
     /// pending deletion, even if that feature has already been removed.
     pub fn reserve_layout_names(&mut self, names: impl IntoIterator<Item = String>) {
         for name in names {
-            if let Some(id) = name.strip_prefix("Extra").and_then(|s| s.parse::<u32>().ok()).filter(|n| format!("Extra{n}") == name) {
-                self.next_id = self.next_id.max(id);
+            if let Some(id) = name.get(5..).and_then(|s| s.parse::<u32>().ok()).filter(|id| name.eq_ignore_ascii_case(&format!("Extra{id}"))) {
+                self.reserved_ids.insert(id);
+            }
+        }
+    }
+    fn allocate_id(&mut self) -> u32 {
+        loop {
+            self.next_id = self.next_id.wrapping_add(1).max(1);
+            if !self.reserved_ids.contains(&self.next_id) && !self.objects.iter().any(|o| o.name == format!("Extra{}", self.next_id)) {
+                return self.next_id;
+            }
+        }
+    }
+
+    pub fn reserve_native_names(&mut self, names: &[String]) {
+        self.reserve_layout_names(names.iter().cloned());
+        // Old projects could save a new Studio feature with the same name as
+        // an embedded object. Its geometry could never have reached the SDK.
+        for index in 0..self.objects.len() {
+            if names.iter().any(|name| self.objects[index].name.eq_ignore_ascii_case(name)) {
+                let id = self.allocate_id();
+                self.objects[index].name = format!("Extra{id}");
             }
         }
     }
@@ -211,8 +232,8 @@ impl Features {
     pub fn add(&mut self, kind: FeatureKind, tape_width_mm: u8) -> Result<(), String> {
         if printable_height(tape_width_mm).is_none() { return Err("Select a supported tape width first.".into()); }
         if self.objects.len() >= MAX_OBJECTS { return Err("A label can have at most 50 additional objects.".into()); }
-        self.next_id = self.next_id.checked_add(1).ok_or("No more object names are available.")?;
-        self.objects.push(Feature::new(kind, self.next_id));
+        let id = self.allocate_id();
+        self.objects.push(Feature::new(kind, id));
         self.selected = Some(self.objects.len() - 1);
         Ok(())
     }
@@ -372,7 +393,7 @@ impl Features {
                 egui::ComboBox::from_id_salt("feature-variant").selected_text(&obj.variant).show_ui(ui, |ui| { for variant in variants { changed |= ui.selectable_value(&mut obj.variant, (*variant).to_owned(), *variant).changed(); } });
             }
         }
-        if let Err(error) = obj.validate() { ui.colored_label(egui::Color32::from_rgb(235, 160, 100), error); }
+        if let Err(error) = obj.validate() { ui.colored_label(ui.visuals().error_fg_color, error); }
         if ui.button("Remove object").clicked() {
             self.objects.remove(index);
             self.selected = if self.objects.is_empty() { None } else { Some(index.min(self.objects.len() - 1)) };

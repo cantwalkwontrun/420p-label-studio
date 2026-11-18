@@ -3,14 +3,38 @@
 //! Staging and temporary recovery data stay in a new dedicated directory beside
 //! the target, so replacement is on the same volume. The caller remains
 //! responsible for warning about unsaved changes and concurrent edits.
-use std::{fs, io::Write, path::{Path, PathBuf}, sync::atomic::{AtomicU64, Ordering}};
+use std::{fs, io::{self, Read, Write}, path::{Path, PathBuf}, sync::atomic::{AtomicU64, Ordering}};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+pub const NATIVE_LIMIT: usize = 16 * 1024 * 1024;
+pub const NATIVE_BASE64_LIMIT: usize = NATIVE_LIMIT.div_ceil(3) * 4;
+// A project may embed a complete native label as base64, plus editing settings.
+pub const PROJECT_LIMIT: usize = 24 * 1024 * 1024;
+
+pub fn read_label(path: &Path) -> io::Result<Vec<u8>> {
+    let native = path.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("dymo") || s.eq_ignore_ascii_case("label"));
+    read_bounded(path, if native { NATIVE_LIMIT } else { PROJECT_LIMIT })
+}
+
+pub fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("File exceeds the {} MiB limit.", limit / (1024 * 1024))));
+    }
+    Ok(bytes)
+}
 
 /// Write a new project, or replace an existing project when `overwrite` is true.
 /// A failed replacement retains the previous file or identifies its recovery
 /// copy in the returned error. This does not resolve concurrent external edits.
 pub fn write_project(path: &Path, bytes: &[u8], overwrite: bool) -> Result<(), String> {
+    write_checked(path, bytes, overwrite, |_| Ok(()))
+}
+
+/// Validate the staged file before making any change to the final destination.
+pub fn write_checked(path: &Path, bytes: &[u8], overwrite: bool, validate: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     if path.file_name().is_none() { return Err("Choose a project file name.".into()); }
     if overwrite {
@@ -18,14 +42,15 @@ pub fn write_project(path: &Path, bytes: &[u8], overwrite: bool) -> Result<(), S
         if !meta.file_type().is_file() { return Err("The existing project is not a regular file.".into()); }
     }
     let staging = create_staging_dir(parent)?;
-    let replacement = staging.join("new.420p");
+    let replacement = staging.join("new").with_extension(path.extension().unwrap_or_default());
     let backup = staging.join("previous.420p");
     let prepared = (|| -> Result<(), String> {
         let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&replacement)
             .map_err(|e| format!("Could not prepare the project: {e}"))?;
         file.write_all(bytes).map_err(|e| format!("Could not write the project: {e}"))?;
         file.sync_all().map_err(|e| format!("Could not finish writing the project: {e}"))?;
-        Ok(())
+        drop(file);
+        validate(&replacement)
     })();
     if let Err(error) = prepared {
         return Err(cleanup_error(error, &replacement, &staging));
@@ -62,7 +87,7 @@ pub fn write_project(path: &Path, bytes: &[u8], overwrite: bool) -> Result<(), S
     Ok(())
 }
 
-fn create_staging_dir(parent: &Path) -> Result<PathBuf, String> {
+pub(crate) fn create_staging_dir(parent: &Path) -> Result<PathBuf, String> {
     for _ in 0..32 {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let dir = parent.join(format!(".dymo-save-{}-{id}", std::process::id()));
@@ -135,6 +160,29 @@ mod tests {
         fs::remove_file(path).unwrap();
         fs::remove_dir(dir).unwrap();
     }
+    #[test]
+    fn failed_staged_validation_keeps_the_previous_file_and_leaves_new_names_free_for_retry() {
+        let dir = fixture();
+        let existing = dir.join("old.dymo");
+        let fresh = dir.join("new.dymo");
+        fs::write(&existing, b"original").unwrap();
+        for (path, overwrite) in [(&fresh, false), (&existing, true)] {
+            let error = write_checked(path, b"candidate", overwrite, |staged| {
+                assert_eq!(staged.extension(), path.extension());
+                assert_eq!(fs::read(staged).unwrap(), b"candidate");
+                Err("unusable label".into())
+            }).unwrap_err();
+            assert!(error.contains("unusable label"));
+        }
+        assert!(!fresh.exists());
+        assert_eq!(fs::read(&existing).unwrap(), b"original");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        write_project(&fresh, b"usable", false).unwrap();
+        fs::remove_file(fresh).unwrap();
+        fs::remove_file(existing).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
     #[test]
     fn overwrite_requires_an_existing_regular_file() {
         let dir = fixture();

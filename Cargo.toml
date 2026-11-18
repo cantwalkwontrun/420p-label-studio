@@ -1,6 +1,6 @@
 [package]
 name = "dymo-420p"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -23,6 +23,8 @@ windows-core = "=0.62.2"
 sha2 = { version = "=0.11.1", default-features = false }
 zip = { version = "=9.5.1", default-features = false, features = ["deflate-flate2"] }
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+
+xml-rs = "=0.8.29"
 
 [build-dependencies]
 winresource = "0.1"

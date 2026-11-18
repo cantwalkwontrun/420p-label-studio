@@ -28,7 +28,9 @@ impl Prepared {
 pub fn resume(install: &Path) -> Result<Option<Prepared>, String> {
     let root_path = install.join(".420p-updater");
     if !root_path.exists() { return Ok(None); }
+    let _guard = crate::updater::download_guard(install)?;
     let root = workspace(install)?;
+    recover_stage(&root)?;
     let path = root.join("staging/prepared.json");
     if !path.exists() { return Ok(None); }
     plain_directory(&root.join("staging"))?; plain_file(&path)?;
@@ -91,15 +93,37 @@ pub fn install_directory() -> Result<PathBuf, String> {
 pub fn workspace(install: &Path) -> Result<PathBuf, String> {
     let canonical = install.canonicalize().map_err(|e| e.to_string())?;
     let root = canonical.join(".420p-updater");
-    match fs::create_dir(&root) {
-        Ok(()) => { fs::write(root.join("owner.txt"), OWNER).map_err(|e| e.to_string())?; }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            plain_directory(&root)?;
-            let marker = root.join("owner.txt");
-            plain_file(&marker)?;
-            if fs::read(marker).map_err(|e| e.to_string())? != OWNER { return Err("The reserved update folder is already in use by something else.".into()); }
+    match fs::symlink_metadata(&root) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Publish the marker and its directory together. A crash during
+            // first use must not leave an unowned directory at the real path.
+            let pending = crate::project_io::create_staging_dir(&canonical)?;
+            let marker = pending.join("owner.txt");
+            let publish = (|| -> std::io::Result<()> {
+                let mut file = fs::File::create_new(&marker)?;
+                file.write_all(OWNER)?;
+                file.sync_all()?;
+                drop(file);
+                fs::rename(&pending, &root)
+            })();
+            if let Err(error) = publish {
+                let _ = fs::remove_file(&marker);
+                let _ = fs::remove_dir(&pending);
+                // Another process may have finished first. Verify its marker
+                // below, just as for an already existing workspace.
+                if fs::symlink_metadata(&root).is_err() {
+                    return Err(format!("Could not initialise the update folder: {error}"));
+                }
+            }
         }
-        Err(error) => return Err(format!("The application folder is not writable. Install the app in a folder you can change: {error}")),
+        Err(error) => return Err(format!("Cannot inspect the update folder: {error}")),
+    }
+    plain_directory(&root)?;
+    let marker = root.join("owner.txt");
+    plain_file(&marker)?;
+    if crate::project_io::read_bounded(&marker, OWNER.len()).map_err(|e| e.to_string())? != OWNER {
+        return Err("The reserved update folder is already in use by something else.".into());
     }
     Ok(root)
 }
@@ -119,7 +143,7 @@ pub fn plain_file(path: &Path) -> Result<(), String> {
 /// Only fixed, app-owned subdirectories are removable. Resolve the exact target
 /// before recursion, and reject reparse points throughout the tree.
 pub fn remove_owned(root: &Path, name: &str) -> Result<(), String> {
-    if !matches!(name, "staging" | "rollback" | "pending-backup") { return Err("Invalid update cleanup target.".into()); }
+    if !matches!(name, "staging" | "incoming" | "previous-stage" | "rollback" | "pending-backup") { return Err("Invalid update cleanup target.".into()); }
     if workspace(root.parent().ok_or("Invalid update folder.")?)? != root { return Err("Invalid update workspace.".into()); }
     let target = root.join(name);
     if !target.try_exists().map_err(|e| e.to_string())? { return Ok(()); }
@@ -142,7 +166,7 @@ pub fn remove_owned(root: &Path, name: &str) -> Result<(), String> {
     remove_tree(&target)
 }
 
-pub fn relative_path(name: &str) -> Result<PathBuf, String> {
+fn validate_components(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 220 || !name.is_ascii() || name.contains('\\') || name.starts_with('/') {
         return Err("The update contains an invalid file path.".into());
     }
@@ -157,6 +181,11 @@ pub fn relative_path(name: &str) -> Result<PathBuf, String> {
             return Err("The update contains a reserved Windows file name.".into());
         }
     }
+    Ok(())
+}
+
+pub fn relative_path(name: &str) -> Result<PathBuf, String> {
+    validate_components(name)?;
     let root = name.split('/').next().unwrap_or("");
     let permitted = if name.contains('/') {
         (root == "sdk" && matches!(Path::new(name).extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase().as_str(), "exe" | "dll" | "json" | "xml" | "dymo"))
@@ -269,9 +298,11 @@ fn extract(archive: &Path, payload: &Path, cancel: &AtomicBool) -> Result<Vec<Fi
         let name = std::str::from_utf8(entry.name_raw()).map_err(|_| "The update contains invalid file names.")?.to_owned();
         if entry.is_dir() {
             let dir = name.strip_suffix('/').ok_or("Invalid update directory.")?;
-            // Directory entries are unnecessary; validate their components using
-            // an allowed child before ignoring them. Parents are created below.
-            relative_path(&format!("{dir}/directory-check.txt"))?;
+            validate_components(dir)?;
+            if !matches!(dir.split('/').next(), Some("sdk" | "licences"))
+                || entry.size() != 0 || entry.unix_mode().is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o040000)) {
+                return Err("The update contains an unsupported directory entry.".into());
+            }
             continue;
         }
         let path = relative_path(&name)?;
@@ -299,12 +330,47 @@ fn extract(archive: &Path, payload: &Path, cancel: &AtomicBool) -> Result<Vec<Fi
     Ok(files)
 }
 
+// Called with the per-install download guard. A rename never merges folders:
+// after interruption either the prior stage or the fully prepared new one wins.
+pub(super) fn recover_stage(root: &Path) -> Result<(), String> {
+    let previous = root.join("previous-stage");
+    if previous.try_exists().map_err(|e| e.to_string())? {
+        plain_directory(&previous)?;
+        let stage = root.join("staging");
+        if stage.try_exists().map_err(|e| e.to_string())? {
+            plain_directory(&stage)?;
+            remove_owned(root, "previous-stage")?;
+        } else {
+            fs::rename(previous, stage).map_err(|e| format!("Cannot restore the previous download: {e}"))?;
+        }
+    }
+    remove_owned(root, "incoming")
+}
+
+fn publish_stage(root: &Path) -> Result<(), String> {
+    let stage = root.join("staging");
+    let previous = root.join("previous-stage");
+    if stage.try_exists().map_err(|e| e.to_string())? {
+        plain_directory(&stage)?;
+        fs::rename(&stage, &previous).map_err(|e| format!("Cannot retain the previous download: {e}"))?;
+    }
+    if let Err(error) = fs::rename(root.join("incoming"), &stage) {
+        if previous.exists() {
+            fs::rename(&previous, &stage).map_err(|e| format!("Cannot restore the previous download: {e}"))?;
+        }
+        return Err(format!("Cannot finish preparing the new download: {error}"));
+    }
+    // The new stage is committed. A later guarded operation can finish cleanup.
+    let _ = remove_owned(root, "previous-stage");
+    Ok(())
+}
+
 pub fn prepare(package: &Package, install: &Path, cancel: &AtomicBool, progress: impl Fn(String, u64, u64)) -> Result<Prepared, String> {
     let _download_guard = crate::updater::download_guard(install)?;
     let root = workspace(install)?;
     if root.join("install.lock.json").exists() || root.join("pending-backup").exists() { return Err("An installation or recovery is already pending. Reopen the app before downloading another update.".into()); }
-    remove_owned(&root, "staging")?;
-    let stage = root.join("staging");
+    recover_stage(&root)?;
+    let stage = root.join("incoming");
     fs::create_dir(&stage).map_err(|e| e.to_string())?;
     let result = (|| {
         download(&package.checksums, &stage.join("checksums.txt"), cancel, &progress)?;
@@ -317,9 +383,11 @@ pub fn prepare(package: &Package, install: &Path, cancel: &AtomicBool, progress:
         cancelled(cancel)?;
         let prepared = Prepared { version: package.version.clone(), install: install.canonicalize().map_err(|e| e.to_string())?, files };
         prepared.save(&stage)?;
+        cancelled(cancel)?;
+        publish_stage(&root)?;
         Ok(prepared)
     })();
-    if result.is_err() { let _ = remove_owned(&root, "staging"); }
+    if result.is_err() { let _ = remove_owned(&root, "incoming"); }
     result
 }
 
@@ -345,6 +413,10 @@ mod tests {
     fn zip_file(path: &Path, names: &[(&str, &[u8])]) {
         let mut archive = zip::ZipWriter::new(fs::File::create(path).unwrap());
         for (name, bytes) in names {
+            if name.ends_with('/') {
+                archive.add_directory(*name, zip::write::SimpleFileOptions::default()).unwrap();
+                continue;
+            }
             archive.start_file(*name, zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
             archive.write_all(bytes).unwrap();
         }
@@ -405,11 +477,47 @@ mod tests {
     }
     #[test] fn complete_archive_round_trips_and_cancel_does_not_extract() {
         let dir = fixture();
-        zip_file(&dir.join("test.zip"), &[(APP_EXE, b"application"), ("sdk/DymoBridge.exe", b"bridge"), ("licences/index.json", b"{}"), ("COPYRIGHT.txt", b"Language: en-GB"), ("THIRD-PARTY-NOTICES.txt", b"Language: en-GB")]);
+        zip_file(&dir.join("test.zip"), &[("sdk/", b""), ("sdk/templates/", b""), ("licences/", b""), (APP_EXE, b"application"), ("sdk/DymoBridge.exe", b"bridge"), ("licences/index.json", b"{}"), ("COPYRIGHT.txt", b"Language: en-GB"), ("THIRD-PARTY-NOTICES.txt", b"Language: en-GB")]);
         let files = extract(&dir.join("test.zip"), &dir.join("payload"), &AtomicBool::new(false)).unwrap();
         assert_eq!(files.len(), 5); verify_files(&dir.join("payload"), &files).unwrap();
         assert!(extract(&dir.join("test.zip"), &dir.join("cancelled"), &AtomicBool::new(true)).is_err());
         assert!(!dir.join("cancelled").exists()); cleanup(dir);
+    }
+    #[test] fn directory_entries_are_restricted_to_valid_managed_components() {
+        for bad in ["sdk/../", "sdk/NUL/", "other/"] {
+            let dir = fixture();
+            zip_file(&dir.join("test.zip"), &[(bad, b"")]);
+            let err = extract(&dir.join("test.zip"), &dir.join("payload"), &AtomicBool::new(false)).unwrap_err();
+            assert!(!err.contains("incomplete"), "{bad}: {err}");
+            cleanup(dir);
+        }
+    }
+    #[test] fn cancellation_and_interrupted_stage_publication_keep_the_last_completed_download() {
+        let install = fixture();
+        let root = workspace(&install).unwrap();
+        let stage = root.join("staging");
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("prepared.json"), b"previous verified stage").unwrap();
+        let update = package(crate::app_updates::DEFAULT_REPOSITORY, "1.2.3", "v1.2.3", &assets()).unwrap();
+        assert!(prepare(&update, &install, &AtomicBool::new(true), |_,_,_| {}).unwrap_err().contains("cancelled"));
+        assert_eq!(fs::read(stage.join("prepared.json")).unwrap(), b"previous verified stage");
+        assert!(!root.join("incoming").exists());
+
+        let incoming = root.join("incoming"); let previous = root.join("previous-stage");
+        fs::create_dir(&incoming).unwrap(); fs::write(incoming.join("prepared.json"), b"new stage").unwrap();
+        fs::rename(&stage, &previous).unwrap(); // interruption before the commit
+        recover_stage(&root).unwrap();
+        assert_eq!(fs::read(stage.join("prepared.json")).unwrap(), b"previous verified stage");
+        assert!(!incoming.exists() && !previous.exists());
+
+        fs::create_dir(&incoming).unwrap(); fs::write(incoming.join("prepared.json"), b"new stage").unwrap();
+        fs::rename(&stage, &previous).unwrap(); fs::rename(&incoming, &stage).unwrap(); // after the commit
+        recover_stage(&root).unwrap();
+        assert_eq!(fs::read(stage.join("prepared.json")).unwrap(), b"new stage"); assert!(!previous.exists());
+        fs::create_dir(&incoming).unwrap(); fs::write(incoming.join("prepared.json"), b"latest stage").unwrap();
+        publish_stage(&root).unwrap(); assert_eq!(fs::read(stage.join("prepared.json")).unwrap(), b"latest stage");
+        assert!(!previous.exists() && !incoming.exists());
+        cleanup(install);
     }
     #[test] fn workspace_cleanup_is_scoped_and_never_touches_user_files() {
         let dir = fixture(); fs::write(dir.join("label.420p"), b"synthetic user label").unwrap();
@@ -420,6 +528,21 @@ mod tests {
     #[test] fn an_existing_unowned_workspace_is_preserved() {
         let dir = fixture(); fs::create_dir(dir.join(".420p-updater")).unwrap(); fs::write(dir.join(".420p-updater/user.txt"), b"keep").unwrap();
         assert!(workspace(&dir).is_err()); assert_eq!(fs::read(dir.join(".420p-updater/user.txt")).unwrap(), b"keep"); cleanup(dir);
+    }
+    #[test] fn concurrent_first_use_sees_a_complete_workspace() {
+        let install = fixture();
+        let gate = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    gate.wait();
+                    let root = workspace(&install).unwrap();
+                    assert_eq!(fs::read(root.join("owner.txt")).unwrap(), OWNER);
+                });
+            }
+        });
+        assert_eq!(fs::read_dir(&install).unwrap().count(), 1);
+        cleanup(install);
     }
     #[test] fn junctions_cannot_redirect_extraction_or_cleanup() {
         let dir = fixture(); let outside = fixture(); fs::write(outside.join("keep.dll"), b"keep").unwrap();

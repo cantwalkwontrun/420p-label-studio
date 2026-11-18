@@ -4,11 +4,9 @@ param([Parameter(Mandatory)][string]$ApplicationPath)
 $ErrorActionPreference = 'Stop'
 $application = (Get-Item -LiteralPath $ApplicationPath).FullName
 if ([IO.Path]::GetFileName($application) -ne 'label-studio-420p.exe') { throw 'Choose the installed 420P Label Studio executable.' }
-$iconSource = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets/label-document-420p.ico'
-if (-not (Test-Path -LiteralPath $iconSource -PathType Leaf)) { throw 'The project document icon is missing.' }
 $progId = '420PLabelStudio.Project'
 $choice = Get-ItemProperty -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.420p\UserChoice' -ErrorAction SilentlyContinue
-if ($choice -and $choice.ProgId -ne $progId) { throw 'Windows has a protected default for .420p. Select 420P Label Studio through Open with before registering; this script will not alter a protected UserChoice.' }
+$protectedDefault = $choice -and $choice.ProgId -ne $progId
 $state = Join-Path $env:LOCALAPPDATA '420P Label Studio/file-association'
 [IO.Directory]::CreateDirectory($state) | Out-Null
 $icon = Join-Path $state 'label-document-420p.ico'
@@ -25,14 +23,13 @@ if (-not (Test-Path -LiteralPath $backup)) {
     }
     [pscustomobject]@{language='en-GB'; registry=@($records); previousIcon=if(Test-Path -LiteralPath $icon){[Convert]::ToBase64String([IO.File]::ReadAllBytes($icon))}else{$null}} | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $backup -Encoding utf8
 }
-Copy-Item -LiteralPath $iconSource -Destination $icon -Force
 function Set-AssociationValue([string]$Subkey, [string]$Value) {
     $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($Subkey)
     try { $key.SetValue('', $Value, [Microsoft.Win32.RegistryValueKind]::String) } finally { $key.Dispose() }
 }
-Set-AssociationValue 'Software\Classes\.420p' $progId
+if (-not $protectedDefault) { Set-AssociationValue 'Software\Classes\.420p' $progId }
 Set-AssociationValue "Software\Classes\$progId" '420P Label Studio label'
-Set-AssociationValue "Software\Classes\$progId\DefaultIcon" ('"' + $icon + '",0')
+Set-AssociationValue "Software\Classes\$progId\DefaultIcon" ('"' + $application + '",-2')
 Set-AssociationValue "Software\Classes\$progId\shell" 'open'
 Set-AssociationValue "Software\Classes\$progId\shell\open\command" ('"' + $application + '" "%1"')
 $openWith = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\Classes\.420p\OpenWithProgids')
@@ -49,8 +46,11 @@ public static class LabelStudioAssociationNative {
 '@
 }
 [LabelStudioAssociationNative]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+if ($protectedDefault) {
+    Write-Output '420P Label Studio is available in Open with. To make it the default, choose it in Windows Open with.'
+    return
+}
 $length = [uint32]32768; $result = [Text.StringBuilder]::new([int]$length)
 $status = [LabelStudioAssociationNative]::AssocQueryStringW(0, 2, '.420p', 'open', $result, [ref]$length)
 if ($status -ne 0 -or $result.ToString() -ne $application) { throw 'Registration was written, but Windows has not resolved the intended default. Use Windows Open with to select the app.' }
-if ((Get-FileHash -LiteralPath $icon).Hash -ne (Get-FileHash -LiteralPath $iconSource).Hash) { throw 'Installed document icon verification failed.' }
 Write-Output 'Registered .420p with 420P Label Studio and verified the Windows open command. No .dymo keys were written.'

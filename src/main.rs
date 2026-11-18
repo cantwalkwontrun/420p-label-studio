@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, RichText, Vec2};
+mod appearance;
+mod file_association;
 mod dymo_service;
 mod sdk;
 mod native_labels;
@@ -97,6 +99,8 @@ struct LabelApp {
     empty_primary_text: Option<String>,
     pending_move: Option<canvas_layout::MoveVisual>,
     preview_paper: Color32,
+    native_preview_has_ink: bool,
+    document_generation: u64,
     design_mode: bool,
     design_image: Option<egui::TextureHandle>,
     design_image_key: String,
@@ -107,6 +111,9 @@ struct LabelApp {
     metric_units: bool,
     show_about: bool,
     show_preferences: bool,
+    appearance: appearance::Appearance,
+    settings_message: String,
+    association_worker: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     show_tips: bool,
     show_layout: bool,
     show_guides: bool,
@@ -163,7 +170,7 @@ struct LabelApp {
 impl Default for LabelApp {
     fn default() -> Self {
         let template_path = built_in_template(9).unwrap_or_default();
-        let mut app = Self { app_update_repository: app_updates::DEFAULT_REPOSITORY.to_owned(), app_update_status: "Check GitHub for the latest app release.".into(), app_update_release: None, app_update_receiver: None, app_update_download: None, app_update_cancel: None, app_update_prepared: None, app_update_progress: None, app_update_install_receiver: None, app_update_restarting: false, app_update_acknowledge: None, app_update_exit_after_download: false, app_update_startup_checked: false, app_update_dismissed_version: None, app_update_startup_message: None, app_update_scroll_requested: false, model_picture: None, export_receiver: None, text: String::new(), width_mm: 9, copies: 1, service_status: "Not checked".into(), status_receiver: None, device_status: None, device_status_time: None, template_path, native_template: None, native_import_receiver: None, conversion_receiver: None, label_converter: label_conversion::Converter::default(), preview_receiver: None, preview_image: None, highres_design: None, preview_dimensions: None, printable_dimensions: None, printable_origin: None, preview_snapshot: None, preview_objects: None, all_layouts: None, empty_primary_text: None, pending_move: None, preview_paper: Color32::WHITE, design_mode: true, design_image: None, design_image_key: String::new(), design_image_receiver: None, right_click_selection: None, preview_context_target: None, show_rulers: true, metric_units: true, show_about: false, show_preferences: false, show_tips: false, show_layout: false, show_guides: false, fit_requested: false, features: features::Features::default(), layout: layout_tools::LayoutState::default(), guides: guides::Guides::default(), canvas: canvas_layout::CanvasInteraction::default(), known_features: Vec::new(), known_image: false, removed_objects: Vec::new(), object_layouts: Vec::new(), project_path: None, saved_disk_snapshot: None, saved_key: String::new(), pending_document_action: None, data_tools: data_tools::DataTools::default(), prepared_batch: Vec::new(), show_batch: false, batch_selected: 0, batch_preview_receiver: None, batch_preview_key: None, batch_preview_texture: None, batch_status: String::new(), allow_close: false, preview_status: "Generate a preview to see the label.".into(), preview_base_key: None, threshold_image_blank: false, image_path: String::new(), black_and_white: true, threshold: 128, preview_key: None, pending_key: None, print_receiver: None, print_cancel: None, print_status: String::new(), connected: None, bold: false, italic: false, underline: false, font: "Segoe UI".into(), fonts: vec!["Segoe UI".into(), "Arial".into(), "Calibri".into()], fonts_receiver: None, align: "Center".into(), next_status_check: std::time::Instant::now(), file_status: String::new(), observed_key: String::new(), preview_due: None, zoom: 2.0, tray: None, tray_error: None };
+        let mut app = Self { app_update_repository: app_updates::DEFAULT_REPOSITORY.to_owned(), app_update_status: "Check GitHub for the latest app release.".into(), app_update_release: None, app_update_receiver: None, app_update_download: None, app_update_cancel: None, app_update_prepared: None, app_update_progress: None, app_update_install_receiver: None, app_update_restarting: false, app_update_acknowledge: None, app_update_exit_after_download: false, app_update_startup_checked: false, app_update_dismissed_version: None, app_update_startup_message: None, app_update_scroll_requested: false, model_picture: None, export_receiver: None, text: String::new(), width_mm: 9, copies: 1, service_status: "Not checked".into(), status_receiver: None, device_status: None, device_status_time: None, template_path, native_template: None, native_import_receiver: None, conversion_receiver: None, label_converter: label_conversion::Converter::default(), preview_receiver: None, preview_image: None, highres_design: None, preview_dimensions: None, printable_dimensions: None, printable_origin: None, preview_snapshot: None, preview_objects: None, all_layouts: None, empty_primary_text: None, pending_move: None, preview_paper: Color32::WHITE, native_preview_has_ink: false, document_generation: 0, design_mode: true, design_image: None, design_image_key: String::new(), design_image_receiver: None, right_click_selection: None, preview_context_target: None, show_rulers: true, metric_units: true, show_about: false, show_preferences: false, appearance: appearance::Appearance::default(), settings_message: String::new(), association_worker: None, show_tips: false, show_layout: false, show_guides: false, fit_requested: false, features: features::Features::default(), layout: layout_tools::LayoutState::default(), guides: guides::Guides::default(), canvas: canvas_layout::CanvasInteraction::default(), known_features: Vec::new(), known_image: false, removed_objects: Vec::new(), object_layouts: Vec::new(), project_path: None, saved_disk_snapshot: None, saved_key: String::new(), pending_document_action: None, data_tools: data_tools::DataTools::default(), prepared_batch: Vec::new(), show_batch: false, batch_selected: 0, batch_preview_receiver: None, batch_preview_key: None, batch_preview_texture: None, batch_status: String::new(), allow_close: false, preview_status: "Generate a preview to see the label.".into(), preview_base_key: None, threshold_image_blank: false, image_path: String::new(), black_and_white: true, threshold: 128, preview_key: None, pending_key: None, print_receiver: None, print_cancel: None, print_status: String::new(), connected: None, bold: false, italic: false, underline: false, font: "Segoe UI".into(), fonts: vec!["Segoe UI".into(), "Arial".into(), "Calibri".into()], fonts_receiver: None, align: "Center".into(), next_status_check: std::time::Instant::now(), file_status: String::new(), observed_key: String::new(), preview_due: None, zoom: 2.0, tray: None, tray_error: None };
         app.saved_key = app.document_key();
         app
     }
@@ -210,15 +217,15 @@ impl LabelApp {
                 ui.add(egui::ProgressBar::new(f32::from(percent) / 100.0).desired_width(90.0).text(format!("{percent}%")));
             } else { ui.label("Unavailable"); }
             match status.charging {
-                Some(true) => { ui.colored_label(Color32::from_rgb(83, 210, 134), "Charging"); }
+                Some(true) => { ui.label("Charging"); }
                 Some(false) => { ui.label("Not charging"); }
                 None => { ui.label("Charging status unavailable"); }
             }
             if let Some(width) = status.tape_width_mm { ui.label(format!("Detected tape: {}", tape_width_label(width))); }
         });
-        for issue in &status.issues { ui.colored_label(Color32::from_rgb(239, 189, 85), issue); }
+        for issue in &status.issues { ui.colored_label(ui.visuals().warn_fg_color, issue); }
         if let Some(width) = status.tape_width_mm.filter(|width| *width != self.width_mm) {
-            ui.colored_label(Color32::from_rgb(239, 189, 85), format!("Detected {width} mm tape; {} mm is selected for this label.", self.width_mm));
+            ui.colored_label(ui.visuals().warn_fg_color, format!("Detected {width} mm tape; {} mm is selected for this label.", self.width_mm));
         }
         if let Some(time) = self.device_status_time {
             if expanded || time.elapsed() > std::time::Duration::from_secs(60) {
@@ -356,7 +363,7 @@ impl LabelApp {
         let (send, receive) = std::sync::mpsc::channel();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.app_update_cancel = Some(cancel.clone()); self.app_update_download = Some(receive);
-        self.app_update_prepared = None; self.app_update_progress = None;
+        self.app_update_progress = None;
         self.app_update_status = "Preparing the verified update download…".into();
         std::thread::spawn(move || {
             let result = update_package::prepare(&package, &install, &cancel, |message, done, total| { let _ = send.send(update_package::DownloadEvent::Progress(message, done, total)); });
@@ -373,10 +380,10 @@ impl LabelApp {
                     self.app_update_progress = Some((done, total));
                 }
                 Ok(update_package::DownloadEvent::Finished(result)) => {
-                    let cancelled = self.app_update_cancel.as_ref().is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Acquire));
                     match result {
-                        Ok(prepared) if !cancelled => { self.app_update_status = "Update verified. Save your work, then restart to install it.".into(); self.app_update_prepared = Some(prepared); }
-                        Ok(_) => self.app_update_status = "Update download cancelled.".into(),
+                        // Publication is the worker's commit point. A later
+                        // cancel click cannot undo an already verified stage.
+                        Ok(prepared) => { self.app_update_status = "Update verified. Save your work, then restart to install it.".into(); self.app_update_prepared = Some(prepared); }
                         Err(error) => self.app_update_status = error,
                     }
                     self.app_update_download = None; self.app_update_cancel = None; self.app_update_progress = None;
@@ -417,8 +424,7 @@ impl LabelApp {
         std::thread::spawn(move || {
             let result = (|| {
                 let bytes = input.render()?;
-                if destination_contents(&path)? != original { return Err("The export file changed while preparing it. Choose another file to avoid overwriting those changes.".into()); }
-                project_io::write_project(&path, &bytes, original.is_some())?;
+                write_native_label(&path, &bytes, original.as_deref())?;
                 Ok(DymoWrite { path, bytes, saved_key, continue_pending })
             })();
             let _ = send.send(result);
@@ -427,6 +433,9 @@ impl LabelApp {
     }
 
     fn capture_dymo_export(&self) -> Result<DymoExportInputs, String> {
+        if self.features.has_counter() {
+            return Err("Save this counter label as a .420p project to keep its sequence. Studio cannot reopen an exported DYMO counter for printing.".into());
+        }
         let objects = self.features.capture_request(self.width_mm)?.as_array().cloned().unwrap_or_default();
         Ok(DymoExportInputs {
             frozen: if self.can_export() { self.preview_snapshot.clone().zip(self.preview_objects.clone()) } else { None },
@@ -481,8 +490,13 @@ impl LabelApp {
         match result { Some(Ok(SaveState::Complete)) => { if let Some(path) = &self.project_path { recents::record(path); } self.file_status = "420P project saved.".into(); }, Some(Err(error)) => self.file_status = error, _ => {} }
     }
 
+    fn has_print_content(&self) -> bool {
+        !self.text.trim().is_empty() || !self.image_path.trim().is_empty() || !self.features.is_empty()
+            || (self.native_template.is_some() && self.native_preview_has_ink && self.preview_key.as_ref() == Some(&self.key()))
+    }
+
     fn can_print(&self) -> bool {
-        (!self.text.trim().is_empty() || !self.image_path.trim().is_empty() || !self.features.is_empty())
+        self.has_print_content()
             && self.connected == Some(true) && self.preview_key.as_ref() == Some(&self.key())
             && self.preview_receiver.is_none() && self.print_receiver.is_none() && !self.canvas.is_dragging() && self.preview_snapshot.is_some() && self.preview_objects.is_some()
             && ((self.features.is_empty() && !self.layout.is_manual()) || !self.design_mode)
@@ -542,7 +556,7 @@ impl LabelApp {
     }
 
     fn batch_key(&self) -> String {
-        format!("{:?}", (self.key(), self.batch_selected, self.prepared_batch.get(self.batch_selected)))
+        format!("{:?}", (self.document_generation, self.key(), self.batch_selected, self.prepared_batch.get(self.batch_selected)))
     }
 
     fn preview_batch_row(&mut self) {
@@ -738,7 +752,9 @@ impl LabelApp {
     fn project_bytes(&self) -> Result<Vec<u8>, String> {
         let template = if built_in_template(self.width_mm).as_ref() == Some(&self.template_path) { format!("builtin:{}", self.width_mm) } else { self.template_path.clone() };
         let value = serde_json::json!({"version":if self.native_template.is_some() {2} else {1},"text":self.text,"width":self.width_mm,"template":template,"image":self.image_path,"monochrome":self.black_and_white,"threshold":self.threshold,"bold":self.bold,"italic":self.italic,"underline":self.underline,"font":self.font,"align":self.align,"objects":self.features.save_value(),"layout":self.layout.save_value(),"guides":self.guides.save_value(),"pendingLayoutRemovals":self.removed_objects,"nativeTemplate":self.native_template.as_ref().map(|n| n.value())});
-        serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())
+        let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
+        if bytes.len() > project_io::PROJECT_LIMIT { return Err("The project exceeds the 24 MiB limit.".into()); }
+        Ok(bytes)
     }
     fn save_as(&mut self, path: &std::path::Path) -> Result<(), String> {
         self.save_as_expected(path, None)
@@ -768,7 +784,7 @@ impl LabelApp {
     fn save_current(&mut self) -> Result<(), String> {
         let path = self.project_path.as_ref().ok_or("Use Save as to choose a file first.")?;
         if has_extension(path, "dymo") || has_extension(path, "label") { return Err("Use the DYMO save operation for native labels.".into()); }
-        let current = std::fs::read(path).map_err(|e| format!("Could not read the existing label: {e}"))?;
+        let current = project_io::read_label(path).map_err(|e| format!("Could not read the existing label: {e}"))?;
         if self.saved_disk_snapshot.as_ref() != Some(&current) { return Err("The label file changed outside this app. Use Save as to avoid overwriting those changes.".into()); }
         let bytes = self.project_bytes()?;
         project_io::write_project(path, &bytes, true)?;
@@ -795,15 +811,51 @@ impl LabelApp {
         if self.document_key() != self.saved_key || (closing && self.data_tools.has_unsaved_contacts()) { self.pending_document_action = Some(action); }
         else { self.perform_document_action(action, ctx); }
     }
+    fn reset_document_views(&mut self) {
+        self.document_generation = self.document_generation.wrapping_add(1);
+        self.prepared_batch.clear();
+        self.batch_selected = 0;
+        self.batch_preview_key = None;
+        self.batch_preview_texture = None;
+        self.batch_status.clear();
+        self.show_batch = false;
+        self.preview_image = None;
+        self.highres_design = None;
+        self.preview_dimensions = None;
+        self.printable_dimensions = None;
+        self.printable_origin = None;
+        self.preview_snapshot = None;
+        self.preview_objects = None;
+        self.all_layouts = None;
+        self.preview_key = None;
+        self.pending_key = None;
+        self.object_layouts.clear();
+        self.empty_primary_text = None;
+        self.pending_move = None;
+        self.preview_context_target = None;
+        self.right_click_selection = None;
+        self.canvas.cancel();
+        self.design_image = None;
+        self.design_image_key.clear();
+        self.preview_base_key = None;
+        self.native_preview_has_ink = false;
+        self.threshold_image_blank = false;
+        self.preview_status = "Generate a preview to see the label.".into();
+        self.observed_key.clear();
+        self.preview_due = Some(std::time::Instant::now());
+    }
+
     fn perform_document_action(&mut self, action: PendingDocumentAction, ctx: &egui::Context) {
         if self.export_receiver.is_some() { self.file_status = "Wait for label saving or export to finish before changing documents, closing or restarting.".into(); return; }
         if matches!(action, PendingDocumentAction::Exit | PendingDocumentAction::InstallUpdate) && self.conversion_receiver.is_some() { self.file_status = "Wait for label conversion to finish before closing or restarting.".into(); return; }
         match action {
             PendingDocumentAction::New => {
+                self.reset_document_views();
                 self.native_template = None;
-                self.text.clear(); self.image_path.clear(); self.features = features::Features::default(); self.layout = layout_tools::LayoutState::default(); self.guides = guides::Guides::default(); self.known_features.clear(); self.known_image = false; self.removed_objects.clear(); self.pending_move = None; self.empty_primary_text = None; self.preview_context_target = None; self.canvas.cancel();
+                self.template_path = built_in_template(self.width_mm).unwrap_or_default();
+                self.text.clear(); self.image_path.clear(); self.features = features::Features::default(); self.layout = layout_tools::LayoutState::default(); self.guides = guides::Guides::default(); self.known_features.clear(); self.known_image = false; self.removed_objects.clear();
                 self.bold = false; self.italic = false; self.underline = false; self.font = "Segoe UI".into(); self.align = "Center".into();
-                self.project_path = None; self.saved_disk_snapshot = None; self.preview_image = None; self.highres_design = None; self.preview_dimensions = None; self.printable_dimensions = None; self.preview_snapshot = None; self.preview_objects = None; self.all_layouts = None; self.preview_key = None; self.object_layouts.clear();
+                self.project_path = None; self.saved_disk_snapshot = None;
                 self.design_mode = true; self.file_status = "New label.".into(); self.saved_key = self.document_key();
                 ctx.data_mut(|data| data.remove::<egui::text_edit::TextEditState>(egui::Id::new("label-text-editor")));
             }
@@ -839,9 +891,7 @@ impl LabelApp {
         }
     }
     fn load_project(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let metadata = std::fs::metadata(path).map_err(|e| format!("Could not open label: {e}"))?;
-        if metadata.len() > 8_388_608 { return Err("Label file is too large (8 MiB maximum).".into()); }
-        let bytes = std::fs::read(path).map_err(|e| format!("Could not open label: {e}"))?;
+        let bytes = project_io::read_bounded(path, project_io::PROJECT_LIMIT).map_err(|e| format!("Could not open label: {e}"))?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("Invalid label file: {e}"))?;
         if !matches!(v["version"].as_u64(), Some(1 | 2)) { return Err("Unsupported label version.".into()); }
         let text = v["text"].as_str().ok_or("Label text missing")?;
@@ -857,7 +907,6 @@ impl LabelApp {
         let font = v["font"].as_str().unwrap_or("Segoe UI");
         let align = v["align"].as_str().unwrap_or("Center");
         if font.trim().is_empty() || font.len() > 128 || font.chars().any(char::is_control) || !["Left", "Center", "Right"].contains(&align) { return Err("Invalid text formatting.".into()); }
-        let template = if template == format!("builtin:{width}") { built_in_template(width as u8).ok_or("Built-in tape template is missing")? } else if template.starts_with("builtin:") { return Err("Invalid built-in template".into()); } else { template.to_owned() };
         let mut features = if let Some(objects) = v.get("objects") { features::Features::load_value(objects, width as u8)? } else { features::Features::default() };
         let native = v.get("nativeTemplate").filter(|value| !value.is_null()).map(native_labels::NativeLabel::from_value).transpose()?;
         if v["version"].as_u64() == Some(2) && native.is_none() { return Err("The embedded DYMO document is missing.".into()); }
@@ -878,30 +927,34 @@ impl LabelApp {
         let layout_value = layout.save_value();
         let layout_names = layout_value["objects"].as_array().into_iter().flatten().filter_map(|item| item["name"].as_str().map(str::to_owned));
         features.reserve_layout_names(layout_names.chain(pending_removals.iter().cloned()));
+        let template = if let Some(document) = &native {
+            features.reserve_native_names(&document.object_names);
+            native_display_name(std::path::Path::new(template))
+        } else if template == format!("builtin:{width}") {
+            built_in_template(width as u8).ok_or("Built-in tape template is missing")?
+        } else if template.starts_with("builtin:") {
+            return Err("Invalid built-in template".into());
+        } else { template.to_owned() };
+        self.reset_document_views();
         self.text = text.to_owned(); self.width_mm = width as u8; self.template_path = template; self.image_path = image.to_owned();
         self.native_template = native;
         self.threshold = threshold as u8; self.black_and_white = monochrome; self.bold = bold; self.italic = italic;
         self.underline = underline; self.font = font.into(); self.align = align.into();
-        self.features = features; self.layout = layout; self.guides = guides; self.known_features = self.features.names(); self.known_image = !self.image_path.is_empty(); self.removed_objects = pending_removals; self.pending_move = None; self.empty_primary_text = None; self.preview_context_target = None; self.canvas.cancel();
+        self.features = features; self.layout = layout; self.guides = guides; self.known_features = self.features.names(); self.known_image = !self.image_path.is_empty(); self.removed_objects = pending_removals;
         if !self.features.is_empty() || self.layout.is_manual() { self.design_mode = false; }
-        self.preview_key = None; self.preview_image = None; self.highres_design = None; self.preview_dimensions = None; self.printable_dimensions = None; self.preview_snapshot = None; self.preview_objects = None; self.all_layouts = None; self.preview_status = "Generate a preview to see the label.".into();
         self.project_path = Some(path.to_owned()); self.saved_disk_snapshot = Some(bytes); self.saved_key = self.document_key();
         Ok(())
     }
 
     fn apply_native_label(&mut self, source: &std::path::Path, native: native_labels::NativeLabel) {
-        let mut fresh = Self::default();
-        fresh.text = native.text.clone(); fresh.width_mm = native.width; fresh.font = native.font.clone(); fresh.bold = native.bold; fresh.italic = native.italic;
-        fresh.underline = native.underline; fresh.align = native.align.clone(); fresh.template_path = source.to_string_lossy().into_owned(); fresh.native_template = Some(native);
-        // Reset document state without replacing app preferences, printer
-        // status or the tray. Pending SDK workers retain their exit tracking.
-        self.text = fresh.text; self.width_mm = fresh.width_mm; self.font = fresh.font; self.bold = fresh.bold; self.italic = fresh.italic; self.underline = fresh.underline; self.align = fresh.align;
-        self.template_path = fresh.template_path; self.native_template = fresh.native_template; self.image_path.clear(); self.features = features::Features::default(); self.layout = layout_tools::LayoutState::default(); self.guides = guides::Guides::default();
-        self.known_features.clear(); self.known_image = false; self.removed_objects.clear(); self.pending_move = None; self.empty_primary_text = None; self.preview_context_target = None; self.canvas.cancel();
-        self.preview_image = None; self.highres_design = None; self.preview_snapshot = None; self.preview_objects = None; self.all_layouts = None; self.preview_key = None; self.pending_key = None; self.preview_dimensions = None; self.printable_dimensions = None; self.printable_origin = None; self.object_layouts.clear();
-        self.design_image = None; self.design_image_key.clear(); self.preview_base_key = None; self.threshold_image_blank = false;
-        self.prepared_batch.clear(); self.batch_preview_key = None; self.batch_preview_texture = None; self.show_batch = false;
-        self.design_mode = false; self.project_path = None; self.saved_disk_snapshot = None; self.saved_key = self.document_key(); self.observed_key.clear(); self.preview_due = Some(std::time::Instant::now());
+        self.reset_document_views();
+        self.text = native.text.clone(); self.width_mm = native.width; self.font = native.font.clone(); self.bold = native.bold; self.italic = native.italic;
+        self.underline = native.underline; self.align = native.align.clone(); self.template_path = native_display_name(source);
+        self.image_path.clear(); self.features = features::Features::default();
+        self.features.reserve_native_names(&native.object_names);
+        self.native_template = Some(native); self.layout = layout_tools::LayoutState::default(); self.guides = guides::Guides::default();
+        self.known_features.clear(); self.known_image = false; self.removed_objects.clear();
+        self.design_mode = false; self.project_path = None; self.saved_disk_snapshot = None; self.saved_key = self.document_key();
         self.file_status = "DYMO label opened. Save as a .420p project or .dymo label; the original is unchanged until you choose to replace it.".into();
     }
 
@@ -916,8 +969,13 @@ impl LabelApp {
         });
     }
 
+    fn uses_sdk_geometry(&self) -> bool {
+        !self.design_mode || self.highres_design.is_some()
+            || (self.preview_image.is_some() && (self.native_template.is_some() || !self.features.is_empty() || self.layout.is_manual()))
+    }
+
     fn preview_target_at(&self, point: egui::Pos2, label_rect: egui::Rect) -> Option<PreviewContextTarget> {
-        if self.preview_key.as_ref() != Some(&self.key()) || (self.design_mode && self.highres_design.is_none()) { return None; }
+        if self.preview_key.as_ref() != Some(&self.key()) || !self.uses_sdk_geometry() { return None; }
         let ((label_width, label_height), (origin_x, origin_y), (width, height), snapshot) =
             (self.preview_dimensions?, self.printable_origin?, self.printable_dimensions?, self.all_layouts.as_ref()?);
         if label_width <= 0.0 || label_height <= 0.0 { return None; }
@@ -952,7 +1010,7 @@ impl LabelApp {
             self.preview_context_target = response.interact_pointer_pos().and_then(|point| self.preview_target_at(point, label_rect));
             if let Some(target) = &self.preview_context_target {
                 self.features.select_by_name(target.name());
-                if self.layout.is_manual() { self.layout.select_only(target.name()); }
+                self.layout.select_only(target.name());
             }
         }
         response.context_menu(|ui| {
@@ -1067,16 +1125,11 @@ fn text_range(text: &str, range: std::ops::Range<usize>) -> &str {
 }
 
 fn destination_contents(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
-    use std::io::Read;
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("Cannot inspect destination: {error}")),
-    };
-    let mut bytes = Vec::new();
-    file.take(8_388_609).read_to_end(&mut bytes).map_err(|e| format!("Cannot read destination: {e}"))?;
-    if bytes.len() > 8_388_608 { return Err("Choose another file; the existing file exceeds 8 MiB.".into()); }
-    Ok(Some(bytes))
+    match project_io::read_label(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Cannot inspect destination: {error}")),
+    }
 }
 
 fn replace_text_range(text: &mut String, range: std::ops::Range<usize>, replacement: &str) -> usize {
@@ -1245,6 +1298,8 @@ impl LabelApp {
                                 let [r, g, b, a] = image.get_pixel(0, 0).0;
                                 self.preview_paper = if a == 0 { Color32::WHITE } else { Color32::from_rgb(r, g, b) };
                             }
+                            self.native_preview_has_ink = self.native_template.is_some() && image.pixels().next().is_some_and(|paper|
+                                image.pixels().any(|pixel| pixel[3] != 0 && pixel != paper));
                             let size = [image.width() as usize, image.height() as usize];
                             let pixels = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
                             self.preview_image = Some(ui.ctx().load_texture("dymo-preview", pixels, egui::TextureOptions::NEAREST));
@@ -1256,7 +1311,7 @@ impl LabelApp {
                         }
                         self.preview_receiver = None;
                     }
-                    Ok(Err(error)) => { self.pending_move = None; self.preview_status = error; self.preview_receiver = None; }
+                    Ok(Err(error)) => { if self.pending_key.take().as_ref() == Some(&self.key()) { self.pending_move = None; self.preview_status = error; } self.preview_receiver = None; }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.preview_status = "Preview worker stopped unexpectedly.".into(); self.preview_receiver = None; }
                     Err(std::sync::mpsc::TryRecvError::Empty) => { ui.ctx().request_repaint_after(std::time::Duration::from_millis(250)); }
                 }
@@ -1270,10 +1325,10 @@ impl LabelApp {
                             self.batch_preview_texture = Some(ui.ctx().load_texture("batch-preview", pixels, egui::TextureOptions::NEAREST));
                             self.batch_preview_key = Some(key);
                             self.batch_status = "Row rendered by DYMO. Every batch row will be checked before any are sent.".into();
-                        } else { self.batch_status = "The label or selected row changed; preview it again.".into(); }
+                        } else if !self.prepared_batch.is_empty() { self.batch_status = "The label or selected row changed; preview it again.".into(); }
                         self.batch_preview_receiver = None;
                     }
-                    Ok((_, Err(error))) => { self.batch_status = error; self.batch_preview_receiver = None; }
+                    Ok((key, Err(error))) => { if key == self.batch_key() { self.batch_status = error; } self.batch_preview_receiver = None; }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.batch_status = "Row preview stopped unexpectedly.".into(); self.batch_preview_receiver = None; }
                     Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(250)),
                 }
@@ -1345,7 +1400,7 @@ impl LabelApp {
                 if let Some(action) = toolbar::object_rail(ui) { self.toolbar_action(action, ui.ctx()); }
             });
             ui.allocate_ui_with_layout(Vec2::new(sidebar_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-            egui::Frame::new().fill(Color32::from_rgb(36, 38, 42)).corner_radius(8).inner_margin(16).show(ui, |ui| {
+            egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(8).inner_margin(16).show(ui, |ui| {
             ui.set_min_width((sidebar_width - 32.0).max(0.0));
             ui.strong("Tape width");
             ui.horizontal_wrapped(|ui| {
@@ -1383,7 +1438,7 @@ impl LabelApp {
                 ui.checkbox(&mut self.black_and_white, "Convert image to black and white");
                 if self.black_and_white { ui.add(egui::Slider::new(&mut self.threshold, 1..=254).text("Image threshold")); }
                 if self.black_and_white && self.preview_key.as_ref() == Some(&self.key()) && self.threshold_image_blank {
-                    ui.label(RichText::new("No black pixels at this threshold. Increase it to reveal darker parts of the image.").small().color(Color32::from_rgb(235, 180, 100)));
+                    ui.label(RichText::new("No black pixels at this threshold. Increase it to reveal darker parts of the image.").small().color(ui.visuals().warn_fg_color));
                 }
             }
             if !self.features.is_empty() {
@@ -1402,7 +1457,7 @@ impl LabelApp {
             ui.allocate_ui_with_layout(Vec2::new(ui.available_width().max(0.0), 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
             formatting_controls(ui, &mut self.bold, &mut self.italic, &mut self.underline, &mut self.font, &self.fonts, &mut self.align);
             ui.label(RichText::new("Edit text above; drag objects on the label preview below.").small().weak());
-            egui::Frame::new().fill(Color32::from_rgb(43, 46, 51)).corner_radius(8).inner_margin(22).show(ui, |ui| {
+            egui::Frame::new().fill(ui.visuals().widgets.inactive.bg_fill).corner_radius(8).inner_margin(22).show(ui, |ui| {
                 egui::Frame::new().fill(Color32::WHITE).stroke(egui::Stroke::new(1.0, Color32::from_gray(160))).inner_margin(8).show(ui, |ui| {
                 ui.visuals_mut().override_text_color = Some(Color32::BLACK);
                 ui.visuals_mut().text_cursor.stroke = egui::Stroke::new(2.0, Color32::BLACK);
@@ -1452,13 +1507,14 @@ impl LabelApp {
             });
             ui.label(&self.preview_status);
             if let Some((length, width)) = self.preview_dimensions {
-                if self.metric_units { ui.label(format!("SDK canvas: {length:.1} × {width:.1} mm · fitted tape: {} · cut length may differ", tape_width_label(self.width_mm))); }
-                else { ui.label(format!("SDK canvas: {:.2} × {:.2} in · fitted tape: {} · cut length may differ", length / 25.4, width / 25.4, tape_width_label(self.width_mm))); }
+                if self.metric_units { ui.label(format!("SDK canvas: {length:.1} × {width:.1} mm · label width: {} · cut length may differ", tape_width_label(self.width_mm))); }
+                else { ui.label(format!("SDK canvas: {:.2} × {:.2} in · label width: {} · cut length may differ", length / 25.4, width / 25.4, tape_width_label(self.width_mm))); }
             } else {
                 ui.label("Label dimensions will appear when the DYMO preview is ready.");
             }
             if self.design_mode {
                 if self.highres_design.is_some() { ui.label("High-resolution SDK design; check DYMO print preview for printer-resolution output."); }
+                else if self.uses_sdk_geometry() { ui.label("Showing the complete printer-resolution preview."); }
                 else {
                     ui.label("Approximate design: check fonts, layout and template objects in DYMO print preview.");
                     if !self.features.is_empty() { ui.label("Additional objects appear in DYMO print preview. Switch to it to move objects accurately."); }
@@ -1492,7 +1548,7 @@ impl LabelApp {
             if self.design_mode && self.highres_design.is_some() {
                 let image = self.highres_design.as_ref().unwrap();
                 ui.painter().image(image.id(), rect, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
-            } else if self.design_mode {
+            } else if self.design_mode && self.native_template.is_none() && !self.uses_sdk_geometry() {
                 let painter = ui.painter().with_clip_rect(rect);
                 painter.rect_filled(rect, 0.0, self.preview_paper);
                 let padding = (rect.height() * 0.12).max(3.0);
@@ -1552,10 +1608,10 @@ impl LabelApp {
                             egui::pos2(rect.left() + rect.width() * (origin_x / label_width) as f32, rect.top() + rect.height() * (origin_y / label_height) as f32),
                             egui::pos2(rect.left() + rect.width() * ((origin_x + print_width) / label_width) as f32, rect.top() + rect.height() * ((origin_y + print_height) / label_height) as f32));
                         self.guides.draw(&ui.painter().with_clip_rect(ui.clip_rect()), bounds, print_width, print_height);
-                        if (!self.design_mode || self.highres_design.is_some()) && let Ok(mut objects) = canvas_layout::objects_from_snapshot(snapshot) {
+                        if self.uses_sdk_geometry() && let Ok(mut objects) = canvas_layout::objects_from_snapshot(snapshot) {
                             if let Some(empty) = &self.empty_primary_text { objects.retain(|object| !object.name.eq_ignore_ascii_case(empty)); }
                             let surface = canvas_layout::Surface { rect: bounds, width_mm: print_width, height_mm: print_height };
-                            let image = if self.design_mode { self.highres_design.as_ref() } else { self.preview_image.as_ref() }.map(|texture| (rect, texture.id(), self.preview_paper));
+                            let image = if self.design_mode { self.highres_design.as_ref().or(self.preview_image.as_ref()) } else { self.preview_image.as_ref() }.map(|texture| (rect, texture.id(), self.preview_paper));
                             let action = self.canvas.show(ui, &preview_response, surface, &objects, &self.layout.selected_names(), self.layout.is_locked(), &self.guides, image);
                             if let Some((name, x, y)) = action.move_to {
                                 self.features.select_by_name(&name);
@@ -1563,7 +1619,8 @@ impl LabelApp {
                                 if self.layout.is_manual() {
                                     self.layout.select_only(&name);
                                     if let Some(moving) = objects.iter().find(|object| object.name.eq_ignore_ascii_case(&name)) {
-                                        if let Some(other) = canvas_layout::collision_at(&objects, moving, x, y, |a, b| self.layout.allows_overlap(a, b)) {
+                                        if let Some(other) = canvas_layout::collision_at(&objects, moving, x, y, |a, b, width, height|
+                                            self.layout.allows_overlap(a, b) || canvas_layout::within_native_overlap(snapshot, a, b, width, height)) {
                                             self.file_status = format!("That position overlaps {other}. Move the objects apart or allow overlap for both in Object layout.");
                                         } else {
                                             match self.layout.move_object(&name, x, y) {
@@ -1577,10 +1634,7 @@ impl LabelApp {
                                 }
                             } else if let Some(name) = action.select {
                                 self.features.select_by_name(&name);
-                                if self.layout.is_manual() { self.layout.select_only(&name); }
-                                else if !self.canvas.is_dragging() {
-                                    match self.layout.enable_manual(snapshot) { Ok(()) => { self.layout.select_only(&name); self.design_mode = false; }, Err(error) => self.file_status = error }
-                                }
+                                self.layout.select_only(&name);
                             }
                         } else { self.canvas.cancel(); }
                     }
@@ -1608,7 +1662,7 @@ impl LabelApp {
                 ui.add(egui::DragValue::new(&mut self.copies).range(1..=100));
             });
             ui.add_space(12.0);
-            let has_content = !self.text.trim().is_empty() || !self.image_path.trim().is_empty() || !self.features.is_empty();
+            let has_content = self.has_print_content();
             let can_print = self.can_print();
             let button_colour = if can_print { Color32::from_rgb(35, 130, 78) } else { Color32::from_gray(55) };
             let icon_colour = if can_print { Color32::WHITE } else { Color32::from_gray(145) };
@@ -1653,11 +1707,18 @@ impl LabelApp {
                     ui.strong(branding::APP_NAME);
                     ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                     ui.small("Copyright (c) 2026 dymo-420p-rust contributors.");
-                    ui.label("Uses the locally installed DYMO Connect software and SDK.");
+                    ui.label("Uses the bundled DYMO Connect SDK and the Windows printer driver.");
                 });
             }
             if self.show_preferences {
                 let mut settings_open = self.show_preferences;
+                if let Some(worker) = &self.association_worker {
+                    match worker.try_recv() {
+                        Ok(result) => { self.settings_message = result.unwrap_or_else(|error| error); self.association_worker = None; }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.settings_message = "File registration stopped unexpectedly.".into(); self.association_worker = None; }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(100)),
+                    }
+                }
                 if self.model_picture.is_none() {
                     if let Ok(image) = image::load_from_memory(include_bytes!("../assets/printer-420p-v6.png")) {
                         let image = image.to_rgba8();
@@ -1680,6 +1741,29 @@ impl LabelApp {
                             self.device_status_ui(ui, true);
                         });
                     });
+                    ui.separator();
+                    ui.strong("Appearance");
+                    let previous = self.appearance;
+                    ui.horizontal_wrapped(|ui| {
+                        for option in appearance::Appearance::OPTIONS {
+                            ui.selectable_value(&mut self.appearance, option, option.name());
+                        }
+                    });
+                    if previous != self.appearance {
+                        self.appearance.apply(ui.ctx());
+                        self.settings_message = match appearance::save(self.appearance) {
+                            Ok(()) => String::new(),
+                            Err(error) => format!("Theme applied for this session. Could not save: {error}"),
+                        };
+                    }
+                    if ui.add_enabled(self.association_worker.is_none(), egui::Button::new("Register .420p files with Windows")).clicked() {
+                        self.settings_message = "Registering .420p files…".into();
+                        let (send, receive) = std::sync::mpsc::channel();
+                        self.association_worker = Some(receive);
+                        std::thread::spawn(move || { let _ = send.send(file_association::register()); });
+                        ui.ctx().request_repaint();
+                    }
+                    if !self.settings_message.is_empty() { ui.label(&self.settings_message); }
                     ui.separator();
                     ui.strong("Print settings");
                     ui.horizontal(|ui| { ui.label("Copies"); ui.add(egui::DragValue::new(&mut self.copies).range(1..=100)); });
@@ -1886,7 +1970,7 @@ fn formatting_controls(ui: &mut egui::Ui, bold: &mut bool, italic: &mut bool, un
 
 fn draw_rulers(ui: &egui::Ui, label: egui::Rect, length_mm: f64, width_mm: f64, metric: bool) {
     let painter = ui.painter();
-    let colour = Color32::from_gray(180);
+    let colour = ui.visuals().text_color();
     let stroke = egui::Stroke::new(1.0, colour);
     let font = egui::FontId::proportional(10.0);
     let unit = if metric { 1.0 } else { 25.4 };
@@ -1937,21 +2021,37 @@ fn startup_label_path(args: impl IntoIterator<Item=std::ffi::OsString>) -> Optio
 
 fn open_label_dialog() -> rfd::FileDialog { rfd::FileDialog::new().add_filter("Label files", &["420p", "dymo", "label"]).add_filter("420P projects", &["420p"]).add_filter("DYMO labels", &["dymo", "label"]) }
 
+fn write_native_label(path: &std::path::Path, bytes: &[u8], previous: Option<&[u8]>) -> Result<(), String> {
+    project_io::write_checked(path, bytes, previous.is_some(), |staged| {
+        let native = native_labels::read(staged)?;
+        sdk::native_preview(native).map_err(|error| format!("Studio could not preview the saved DYMO label: {error}"))?;
+        if destination_contents(path)?.as_deref() != previous {
+            return Err("The destination changed while preparing the label. Choose another file to preserve those changes.".into());
+        }
+        Ok(())
+    })
+}
+
 fn convert_label_file(source: &std::path::Path, target: &std::path::Path, direction: label_conversion::Direction) -> Result<(), String> {
     let mut document = LabelApp::default();
     match direction {
         label_conversion::Direction::ToProject => {
-            let native = native_labels::read(source)?; document.apply_native_label(source, native); document.save_as(target)?;
+            let native = native_labels::read(source)?;
+            document.apply_native_label(source, native);
             let expected = document.project_bytes()?;
-            if std::fs::read(target).map_err(|e| e.to_string())? != expected { return Err("The converted project failed read-back verification; original kept.".into()); }
-            let mut reopened = LabelApp::default(); reopened.load_project(target)?;
-            if reopened.project_bytes()? != expected { return Err("The converted project did not retain its contents; original kept.".into()); }
-            Ok(())
+            project_io::write_checked(target, &expected, false, |staged| {
+                let mut reopened = LabelApp::default();
+                reopened.load_project(staged)?;
+                if reopened.project_bytes()? != expected { return Err("The converted project did not retain its contents; original kept.".into()); }
+                let embedded = reopened.native_template.ok_or("The converted project lost its embedded label.")?;
+                sdk::native_preview(embedded).map_err(|error| format!("Studio could not preview the converted project: {error}"))?;
+                Ok(())
+            })
         }
         label_conversion::Direction::ToDymo => {
-            document.load_project(source)?; let bytes = document.capture_dymo_export()?.render()?; project_io::write_project(target, &bytes, false)?;
-            if std::fs::read(target).map_err(|e| e.to_string())? != bytes { return Err("The converted DYMO label failed read-back verification; original kept.".into()); }
-            native_labels::read(target)?; Ok(())
+            document.load_project(source)?;
+            let bytes = document.capture_dymo_export()?.render()?;
+            write_native_label(target, &bytes, None)
         }
     }
 }
@@ -1966,6 +2066,10 @@ fn save_label_dialog(current: Option<&std::path::Path>) -> rfd::FileDialog {
     let name = current.and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("label");
     let dialog = dialog.set_file_name(name);
     if let Some(parent) = current.and_then(|p| p.parent()).filter(|p| !p.as_os_str().is_empty()) { dialog.set_directory(parent) } else { dialog }
+}
+
+fn native_display_name(path: &std::path::Path) -> String {
+    path.file_name().filter(|name| !name.is_empty()).map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| "Embedded label.dymo".into())
 }
 
 fn built_in_template(width: u8) -> Option<String> {
@@ -2228,6 +2332,64 @@ mod project_tests {
         std::fs::remove_file(path).unwrap(); std::fs::remove_file(project).unwrap();
     }
     #[test]
+    fn large_native_image_roundtrips_through_checked_save_and_project_conversion() {
+        let (Ok(fixtures), Ok(_)) = (std::env::var("DYMO_TEST_TEMPLATE_DIR"), std::env::var("DYMO_TEST_BRIDGE")) else { return; };
+        let dir = std::env::temp_dir().join(format!("420p-large-image-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&dir).unwrap();
+        let image = dir.join("synthetic.png");
+        let mut state = 47_u32;
+        let mut channel = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8
+        };
+        image::RgbImage::from_fn(1050, 1050, |_, _| image::Rgb([channel(), channel(), channel()])).save(&image).unwrap();
+        let native = dir.join("original.dymo");
+        let project = dir.join("embedded.420p");
+        let restored = dir.join("restored.dymo");
+        let mut app = LabelApp { template_path: std::path::Path::new(&fixtures).join("9mm.dymo").to_string_lossy().into_owned(),
+            black_and_white: false, image_path: image.to_string_lossy().into_owned(), ..Default::default() };
+        assert_eq!(app.save_label_as_from_dialog(&native, false).unwrap(), SaveState::Pending);
+        finish_test_dymo_save(&mut app);
+        assert!(std::fs::metadata(&native).unwrap().len() > 4 * 1024 * 1024);
+        let preview = sdk::native_preview(native_labels::read(&native).unwrap()).unwrap().image;
+        convert_label_file(&native, &project, label_conversion::Direction::ToProject).unwrap();
+        std::fs::remove_file(&image).unwrap();
+        std::fs::remove_file(&native).unwrap();
+        convert_label_file(&project, &restored, label_conversion::Direction::ToDymo).unwrap();
+        assert_eq!(sdk::native_preview(native_labels::read(&restored).unwrap()).unwrap().image, preview);
+        std::fs::remove_file(project).unwrap();
+        std::fs::remove_file(restored).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn conversion_refuses_to_recycle_a_counter_project_or_leave_an_unusable_destination() {
+        use label_conversion::{Direction, Event, Request};
+        let root = std::env::temp_dir().join(format!("420p-convert-counter-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        let output = root.join("output");
+        std::fs::create_dir(&output).unwrap();
+        let source = root.join("sequence.420p");
+        let mut app = LabelApp::default();
+        app.features.add(features::FeatureKind::Counter, 9).unwrap();
+        app.save_as(&source).unwrap();
+        let original = std::fs::read(&source).unwrap();
+        let mut request = Request::folder(root.clone(), output.clone(), Direction::ToDymo, false);
+        request.recycle_originals = true;
+        let mut result = None;
+        label_conversion::run(request, &std::sync::atomic::AtomicBool::new(false),
+            |event| if let Event::Finished(summary) = event { result = Some(summary); }, convert_label_file);
+        let result = result.unwrap();
+        assert_eq!((result.converted, result.recycled, result.skipped), (0, 0, 1));
+        assert!(result.details.iter().any(|e| e.contains("counter") && e.contains(".420p")));
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&output).unwrap().count(), 0);
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_dir(output).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
     fn directory_conversion_round_trips_both_formats_with_subfolders_and_sdk_preview_equality_when_fixtures_supplied() {
         use base64::Engine;
         use label_conversion::{Direction, Event, Request};
@@ -2276,16 +2438,16 @@ mod project_tests {
             let before = std::fs::read(&path).unwrap(); let native = native_labels::read_with_bridge(&path, bridge.clone().into()).unwrap();
             let reference = base64::engine::general_purpose::STANDARD.decode(native.reference_preview.as_ref().unwrap()).unwrap();
             let reference = image::load_from_memory(&reference).unwrap().to_rgba8();
-            let preview = sdk::native_preview_for_test(bridge.clone().into(), native.clone(), native.text.clone()).unwrap(); assert_eq!(reference, preview.image, "The imported native preview changed");
+            let preview = sdk::native_preview(native.clone()).unwrap(); assert_eq!(reference, preview.image, "The imported native preview changed");
             let mut app = LabelApp::default(); app.apply_native_label(&path, native);
             let target = std::env::temp_dir().join(format!("420p-native-converted-{}-{tested}.420p", std::process::id())); app.save_as(&target).unwrap();
             assert!(app.save_as(&target).is_err(), "conversion must not overwrite an existing project");
             let mut reopened = LabelApp::default(); reopened.load_project(&target).unwrap(); let embedded = reopened.native_template.unwrap();
-            let preview = sdk::native_preview_for_test(bridge.clone().into(), embedded, reopened.text).unwrap(); assert_eq!(reference, preview.image, "The converted project preview changed");
+            let preview = sdk::native_preview(embedded).unwrap(); assert_eq!(reference, preview.image, "The converted project preview changed");
             let dymo_target = target.with_extension("dymo");
             assert_eq!(app.save_label_as_from_dialog(&dymo_target, false).unwrap(), SaveState::Pending); finish_test_dymo_save(&mut app);
             let resaved = native_labels::read_with_bridge(&dymo_target, bridge.clone().into()).unwrap();
-            let preview = sdk::native_preview_for_test(bridge.clone().into(), resaved, app.text.clone()).unwrap(); assert_eq!(reference, preview.image, "Saving as DYMO changed the imported preview");
+            let preview = sdk::native_preview(resaved).unwrap(); assert_eq!(reference, preview.image, "Saving as DYMO changed the imported preview");
             std::fs::remove_file(dymo_target).unwrap();
             assert_eq!(before, std::fs::read(&path).unwrap(), "The original DYMO file changed"); std::fs::remove_file(target).unwrap(); tested += 1;
         }
@@ -2337,11 +2499,16 @@ mod project_tests {
         assert!(matches!(app.pending_document_action, Some(PendingDocumentAction::Exit))); assert_eq!(app.text, "Keep this work"); assert!(!app.allow_close);
     }
     #[test]
-    fn a_cancelled_download_cannot_become_an_installable_update() {
+    fn download_completion_keeps_the_ui_in_sync_with_the_committed_stage() {
         let mut app = LabelApp::default(); let (send, receive) = std::sync::mpsc::channel(); app.app_update_download = Some(receive);
         app.app_update_cancel = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)));
         send.send(update_package::DownloadEvent::Finished(Ok(update_package::Prepared { version: "9.0.0".into(), install: std::path::PathBuf::from("synthetic"), files: Vec::new() }))).unwrap();
-        app.poll_app_update_download(&egui::Context::default()); assert!(app.app_update_prepared.is_none()); assert!(app.app_update_download.is_none());
+        app.poll_app_update_download(&egui::Context::default());
+        assert_eq!(app.app_update_prepared.as_ref().unwrap().version, "9.0.0");
+        let (send, receive) = std::sync::mpsc::channel(); app.app_update_download = Some(receive);
+        send.send(update_package::DownloadEvent::Finished(Err("Update download cancelled.".into()))).unwrap();
+        app.poll_app_update_download(&egui::Context::default());
+        assert_eq!(app.app_update_prepared.unwrap().version, "9.0.0"); assert!(app.app_update_download.is_none());
     }
     #[test]
     fn a_restart_helper_error_keeps_the_editor_open_and_the_label_intact() {
@@ -2352,6 +2519,76 @@ mod project_tests {
         egui::__run_test_ui(|ui| { ui.set_width(1000.0); app.draw(ui); });
         assert!(!app.allow_close); assert!(!app.app_update_restarting); assert_eq!(app.text, "Keep this label"); assert!(app.app_update_status.contains("Synthetic permission failure"));
     }
+    #[test]
+    fn new_and_open_clear_batch_and_keep_embedded_sources_local() {
+        use base64::Engine;
+        let mut app = LabelApp::default();
+        let native = native_labels::NativeLabel::from_value(&serde_json::json!({
+            "xml":base64::engine::general_purpose::STANDARD.encode(b"<DesktopLabel><LabelObjects><ShapeObject><Name>eXtra1</Name></ShapeObject></LabelObjects></DesktopLabel>"),
+            "text":"","width":9,"font":"Arial","bold":false,"italic":false,"underline":false,"align":"Center"
+        })).unwrap();
+        let source = std::env::temp_dir().join("synthetic-origin").join("artwork.dymo");
+        app.apply_native_label(&source, native);
+        app.features.add(features::FeatureKind::Shape, 9).unwrap();
+        assert_eq!(app.features.names(), ["Extra2"]);
+        let mut legacy: serde_json::Value = serde_json::from_slice(&app.project_bytes().unwrap()).unwrap();
+        assert_eq!(legacy["template"], "artwork.dymo");
+        legacy["template"] = serde_json::json!(source);
+        legacy["objects"] = serde_json::json!([]); // Project written before native name reservations.
+        let target = std::env::temp_dir().join(format!("studio-editor-reopen-{}.420p", std::process::id()));
+        std::fs::write(&target, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        app.prepared_batch.push("Previous job".into());
+        app.show_batch = true;
+        let previous_generation = app.batch_key();
+        app.perform_document_action(PendingDocumentAction::New, &egui::Context::default());
+        assert!(app.native_template.is_none());
+        assert_eq!(app.template_path, built_in_template(9).unwrap_or_default());
+        assert!(app.prepared_batch.is_empty() && !app.show_batch && app.batch_preview_key.is_none());
+        app.prepared_batch.push("Previous job".into());
+        assert_ne!(app.batch_key(), previous_generation);
+        app.load_project(&target).unwrap();
+        assert!(app.prepared_batch.is_empty());
+        assert_eq!(app.template_path, "artwork.dymo");
+        app.features.add(features::FeatureKind::Shape, 9).unwrap();
+        assert_eq!(app.features.names(), ["Extra2"]);
+        std::fs::remove_file(target).unwrap();
+    }
+
+    #[test]
+    fn native_artwork_only_can_print_from_complete_sdk_fallback_when_fixtures_supplied() {
+        let (Ok(dir), Ok(_)) = (std::env::var("DYMO_TEST_TEMPLATE_DIR"), std::env::var("DYMO_TEST_BRIDGE")) else { return; };
+        let template = std::path::Path::new(&dir).join("9mm.dymo");
+        let barcode = serde_json::json!({"kind":"barcode","name":"Extra1","value":"12345","xmm":0,"ymm":0,"widthMm":5,"heightMm":5});
+        let preview = sdk::preview(template.to_string_lossy().into_owned(), "".into(), "".into(), false, 128, 9, false, false, false, "Segoe UI".into(), "Center".into(), vec![barcode], None, None).unwrap();
+        assert!(preview.design_image.is_none(), "barcodes require the complete standard image");
+        let bytes = sdk::export_snapshot(&preview.snapshot, String::new(), preview.objects).unwrap();
+        let path = std::env::temp_dir().join(format!("studio-artwork-fallback-{}.dymo", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let mut app = LabelApp::default();
+        app.next_status_check = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        app.connected = Some(true);
+        for (file, has_ink) in [(&path, true), (&template, false)] {
+            let native = native_labels::read(file).unwrap();
+            app.apply_native_label(file, native.clone());
+            app.design_mode = true;
+            app.observed_key = app.key();
+            let preview = sdk::native_preview(native).unwrap();
+            let (send, receive) = std::sync::mpsc::channel();
+            app.preview_receiver = Some(receive); app.pending_key = Some(app.key()); app.preview_due = None;
+            send.send(Ok(PreviewAttempt { layout: None, preview: Ok(preview) })).unwrap();
+            egui::__run_test_ui(|ui| { ui.set_width(1100.0); app.draw(ui); });
+            assert!(app.uses_sdk_geometry());
+            assert!(app.preview_image.is_some() && app.highres_design.is_none());
+            assert_eq!(app.can_print(), has_ink);
+        }
+        app.native_template = None;
+        app.features.add(features::FeatureKind::Barcode, 9).unwrap();
+        assert!(app.uses_sdk_geometry(), "Studio objects also use the complete standard preview when the high-resolution SDK renderer is unavailable");
+        app.preview_image = None;
+        assert!(!app.uses_sdk_geometry(), "provisional edits can use the approximate design before a render completes");
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn full_editor_primary_drag_moves_shape_with_empty_text_and_nested_scroll_area() {
         let mut app = LabelApp { template_path: "synthetic.dymo".into(), design_mode: false, zoom: 1.0, ..Default::default() };
@@ -2375,11 +2612,17 @@ mod project_tests {
                 if app.preview_image.is_none() { app.preview_image = Some(ui.ctx().load_texture("synthetic-preview", egui::ColorImage::filled([290, 64], Color32::YELLOW), egui::TextureOptions::NEAREST)); }
                 app.draw(ui);
             });
+            (app.layout.is_manual(), app.layout.selected_names(), app.document_key())
         };
-        frame(vec![]);
+        let (_, _, before_click) = frame(vec![]);
         let rect = ctx.data(|data| data.get_temp::<egui::Rect>(egui::Id::new("test-label-preview-rect"))).unwrap();
         let start = egui::pos2(rect.left() + rect.width() * (26.783333 / 40.866664) as f32, rect.center().y);
         let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(vec![egui::Event::PointerMoved(start), button(start, true)]);
+        let (manual, selection, after_click) = frame(vec![button(start, false)]);
+        assert!(!manual);
+        assert_eq!(selection, ["Extra1"]);
+        assert_eq!(before_click, after_click, "inspection must not dirty the document");
         frame(vec![egui::Event::PointerMoved(start), button(start, true)]);
         let end = start - Vec2::new(25.0, 0.0);
         frame(vec![egui::Event::PointerMoved(end)]);
@@ -2617,16 +2860,12 @@ fn main() -> eframe::Result {
         branding::APP_NAME,
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            let mut style = (*cc.egui_ctx.style_of(egui::Theme::Dark)).clone();
-            style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-            style.spacing.button_padding = egui::vec2(10.0, 6.0);
-            style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-            style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-            style.text_styles.insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
-            style.text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
-            cc.egui_ctx.set_style_of(egui::Theme::Dark, style);
             let mut app = LabelApp::default();
+            match appearance::load() {
+                Ok(theme) => app.appearance = theme,
+                Err(error) => app.settings_message = error,
+            }
+            app.appearance.apply(&cc.egui_ctx);
             app.app_update_acknowledge = acknowledge;
             if let Some(message) = update_message { app.app_update_startup_message = Some(message.clone()); app.app_update_status = message; }
             let update_preferences_loaded = match app_updates::load_repository() {

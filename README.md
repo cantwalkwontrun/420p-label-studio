@@ -8,7 +8,7 @@ A Windows desktop label editor dedicated to the DYMO LabelManager 420P. The inte
 
 ## Features
 
-- Dark editor with text formatting, image thresholding, metric/imperial sizes and millimetre rulers.
+- Light, Dark, System and FireFly Pro appearances with text formatting, image thresholding, metric/imperial sizes and rulers. Choose an appearance in **File → Settings**. Dark is the default for existing installations. System follows Windows. Appearance preferences are local to the user and apply to the editor chrome.
 - Smooth design and printer-resolution SDK previews.
 - Object selection, dragging, guides, alignment and manual positions retained across object changes.
 - Shapes, lines, addresses, barcodes, QR codes, captured dates and counters.
@@ -21,9 +21,9 @@ Print jobs use the same frozen template, image and captured object values as the
 
 Extract the complete release ZIP to a folder and run `label-studio-420p.exe`. Keep the `sdk` directory beside it. The app requires 64-bit Windows 10 or later, the x64 .NET 10 Desktop Runtime, and the DYMO 420P Windows printer driver. Printing was physically tested with DYMO Connect services stopped; uninstalling DYMO Connect and restoring the driver has not yet been tested. Read `COPYRIGHT.txt` and the bundled third-party terms before using or redistributing the release; agreement to the included Microsoft component terms is required. The release is unsigned, so Windows may show an unknown-publisher prompt. Existing project files and local preferences are stored separately from the application folder.
 
-## Build and test
+Use **File → Settings → Register .420p files with Windows** to register the extracted application for the current user. Windows Explorer uses the label document icon embedded in the executable. If another app is the protected default, Studio appears in **Open with** and Windows lets you choose the default. Registration is scoped to `.420p`. Run it again after moving the application. The same operation is available to source users through `scripts/register-file-type.ps1 -ApplicationPath <exe>`.
 
-Optional Windows file-type registration is provided by `scripts/register-file-type.ps1`, with the installed executable supplied through `-ApplicationPath`. It registers `.420p` for the current user, installs a separate document icon in local application data and keeps one local registration rollback record. It checks Windows' resolved open command and leaves `.dymo` registrations and protected Windows defaults untouched. The app installation path must remain valid; rerun registration after moving the app. This source utility is separate from the application update package.
+## Build and test
 
 Use Windows with Rust 1.95 or later, the .NET 10 SDK, and Visual Studio's Desktop development with C++ workload and Windows SDK. The 420P Windows printer driver is required for hardware printing.
 
@@ -39,6 +39,8 @@ The script restores the pinned dependencies, builds the bridge, supplies synthet
 
 The `sdk` directory must remain beside `label-studio-420p.exe`. Local preferences, contacts, projects, diagnostics, package caches and build outputs are not repository content.
 
+Release maintainers can independently scan synthetic QR labels using Python, NumPy and OpenCV. Run `python scripts/check-release-qr.py <extracted-application-folder>`. It verifies the payload in the printer-resolution and smooth previews before and after a DYMO export. The printer is not used. The runtime SDK and printer interfaces are documented in [DYMO's official SDK sample](https://github.com/dymosoftware/DCD-SDK-Sample).
+
 ## Existing DYMO labels and conversion
 
 Use **File → Open** or **Open saved label** for DYMO Connect `.dymo` labels and `.420p` projects. Dragging a label onto the window and Windows **Open with** file arguments use the same opening path. Opening a native label preserves its embedded images, formatting and layout; its first text object can be edited. Original files are not changed. LabelWriter formats and other unsupported tape formats produce a clear error.
@@ -49,7 +51,9 @@ Use **File → Convert labels…** for **DYMO → 420P** or **420P → DYMO** co
 
 Originals are kept by default. **Recycle originals after verified conversion** is optional and changes the action button to **Convert and recycle verified originals**. Each output is read back and reopened before an original becomes eligible; changed originals, failed conversions and skipped existing outputs are kept. Optional source-folder removal only considers emptied folders associated with successfully recycled originals and never recursively removes a folder. Windows recycling is restricted to local fixed disks, explicitly requests the Recycle Bin, refuses callbacks without recycling flags and checks the shell's result. It does not fall back to a direct delete. See [Microsoft's file-operation flags](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-setoperationflags) and [pre-delete callbacks](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperationprogresssink-predeleteitem). Recycled items can be recovered through the Windows Recycle Bin.
 
-Converted `.420p` projects embed the original DYMO document, so they do not depend on the source file remaining in its original folder. These embedded projects require version 0.1.6 or later; earlier project files remain supported. Reverse conversion uses the same checked SDK export as **Save as DYMO**. Other `.420p` projects still need their referenced template and image files to be accessible. Tape width is retained rather than silently resizing or discarding imported objects. Existing restrictions on dynamic dates and counters still apply before printing.
+Converted `.420p` projects embed the original DYMO document, so they can reopen after the source file moves. These embedded projects require version 0.1.6 or later. Other Studio projects still need access to their referenced template and image files. Conversion preserves the tape width. Studio checks that it can reopen and preview each staged output before completing conversion or recycling an original. Save active counter sequences as `.420p` to preserve their behaviour. Studio reports these files as skipped or failed during DYMO export and keeps the originals.
+
+**QR labels made in v0.1.10.** A QR code added in Studio could encode `123456789` instead of the text you entered. Open the original `.420p` project in v0.1.11 or later, scan the corrected preview and reprint affected labels. If you only have an exported `.dymo` file containing the wrong value, recreate the QR object with the intended text.
 
 **Save as…** offers **420P project (*.420p)** and **DYMO label (*.dymo)** in the file type list. Projects retain Studio editing settings and guides. DYMO labels embed images and resolved layout for opening in DYMO Connect; Studio-only settings are not stored in that format. Subsequent **Save / Ctrl+S** updates the chosen format. Saving a DYMO label works without a printer or an already-generated preview: the SDK validates the saved content and layout before writing it. Existing files are replaced only after the save dialogue's confirmation, and externally changed files are protected. The separate **Export DYMO label…** command saves a copy without changing the current document's save destination.
 
@@ -67,11 +71,11 @@ Installation requires a writable application folder. It waits for printer operat
 
 Release binaries remain unsigned. Checksums detect corruption but do not protect against a compromised release publisher. The updater does not install drivers, prerequisites or firmware, request administrator privileges, or silently install an update while the editor is in use.
 
-Versions 0.1.1 and 0.1.2 reject repository redirects; change their update repository in Settings to the new address or upgrade manually. Version 0.1.3 has release checks but no installer. Install version 0.1.4 or later once from [420P Label Studio releases](https://github.com/cantwalkwontrun/420p-label-studio/releases) to enable future in-app installation.
+For versions 0.1.1 through 0.1.5, install a current release manually once. Versions 0.1.4 and 0.1.5 recognise the previous repository owner for automatic installation and cannot follow the owner's redirect. Version 0.1.10 and later recognise the current owner and support subsequent in-app installations. [Download 420P Label Studio](https://github.com/cantwalkwontrun/420p-label-studio/releases)
 
 ## Limitations
 
-The 420P supports 6, 9, 12 and 19 mm D1 tape and has a manual cutter. Enlarging a printer-resolution preview exposes its dots. The smooth view is a design aid; barcodes can fall back to an approximate view and require checking the regular SDK preview. Rulers describe the SDK canvas, not the physical cut length.
+The 420P supports 6, 9, 12 and 19 mm D1 tape and has a manual cutter. When the SDK cannot produce a high-resolution design for an object such as a barcode, the editor can show the complete printer-resolution preview. Enlarging it exposes the printer dots. Rulers measure the SDK canvas. The physical cut length can differ.
 
 Geometry editing, smooth rendering and resolved export depend on guarded private SDK members. Export is accepted only after a saved/reloaded label reproduces the resolved XML and printer-resolution bitmap. Unsupported SDK changes fail safely. Gross template-width mismatches are rejected when geometry is available.
 

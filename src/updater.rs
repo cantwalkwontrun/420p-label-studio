@@ -27,12 +27,16 @@ pub(crate) fn version(value: &str) -> Result<[u32; 4], String> {
     Ok(result)
 }
 
-fn read_json(path: &Path) -> Result<serde_json::Value, String> {
+fn read_metadata(path: &Path) -> Result<Vec<u8>, String> {
     package::plain_file(path)?;
     let mut bytes = Vec::new();
     fs::File::open(path).map_err(|e| e.to_string())?.take(MAX_JSON + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     if bytes.len() as u64 > MAX_JSON { return Err("Update recovery metadata is too large.".into()); }
-    serde_json::from_slice(&bytes).map_err(|e| format!("Invalid update recovery metadata: {e}"))
+    Ok(bytes)
+}
+
+fn read_json(path: &Path) -> Result<serde_json::Value, String> {
+    serde_json::from_slice(&read_metadata(path)?).map_err(|e| format!("Invalid update recovery metadata: {e}"))
 }
 
 fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
@@ -115,11 +119,47 @@ fn remove_file(path: &Path) -> Result<(), String> {
 fn write_result(root: &Path, message: &str) { let _ = write_json(&root.join("result.json"), &serde_json::json!({"schema":SCHEMA,"message":message})); }
 
 fn check_lock(root: &Path) -> Result<bool, String> {
+    if !root.join("install.lock.json").try_exists().map_err(|e| e.to_string())? { return Ok(false); }
+    let _guard = metadata_guard(root)?;
+    check_lock_guarded(root)
+}
+
+// Windows releases the file lock when the holder exits, including after a
+// process crash. All lock-record readers and writers serialise through it.
+fn metadata_guard(root: &Path) -> Result<fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let path = root.join("install-metadata.guard");
+    let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .custom_flags(0x00200000) // FILE_FLAG_OPEN_REPARSE_POINT
+        .open(&path).map_err(|e| format!("Cannot reserve update metadata: {e}"))?;
+    package::plain_file(&path)?;
+    file.lock().map_err(|e| format!("Cannot lock update metadata: {e}"))?;
+    Ok(file)
+}
+
+fn check_lock_guarded(root: &Path) -> Result<bool, String> {
     let lock = root.join("install.lock.json");
     if !lock.try_exists().map_err(|e| e.to_string())? { return Ok(false); }
-    let value = read_json(&lock)?;
-    let identity = ProcessIdentity { pid: u32::try_from(value["pid"].as_u64().filter(|n| *n != 0).ok_or("Invalid updater lock.")?).map_err(|_| "Invalid updater lock.")?, created: value["created"].as_u64().filter(|n| *n != 0).ok_or("Invalid updater lock.")? };
-    if native::alive(identity)? { Ok(true) } else { remove_file(&lock)?; Ok(false) }
+    let bytes = read_metadata(&lock)?;
+    let identity = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| {
+        let pid = u32::try_from(v["pid"].as_u64()?).ok().filter(|p| *p != 0)?;
+        let created = v["created"].as_u64().filter(|c| *c != 0)?;
+        Some(ProcessIdentity { pid, created })
+    });
+    if let Some(identity) = identity {
+        if native::alive(identity)? { return Ok(true); }
+    }
+    // Earlier releases could leave an empty lock before writing the owner.
+    // Keep the plan and journal for normal startup recovery in every case.
+    remove_file(&lock)?;
+    Ok(false)
+}
+
+fn claim_install(root: &Path) -> Result<(), String> {
+    let _guard = metadata_guard(root)?;
+    if check_lock_guarded(root)? { return Err("Another restart helper is already running.".into()); }
+    let own = native::current()?;
+    write_json(&root.join("install.lock.json"), &serde_json::json!({"pid":own.pid,"created":own.created}))
 }
 
 fn clear_empty_intent(root: &Path) -> Result<(), String> {
@@ -143,6 +183,7 @@ pub fn start(prepared: &Prepared) -> Result<(), String> {
     if prepared.install != install || std::env::current_exe().map_err(|e| e.to_string())?.file_name().and_then(|s| s.to_str()) != Some(APP_EXE) { return Err("The downloaded update belongs to a different app folder.".into()); }
     let root = package::workspace(&install)?;
     if check_lock(&root)? || root.join("pending-backup").exists() { return Err("Another update or recovery is already in progress.".into()); }
+    package::recover_stage(&root)?;
     package::verify_files(&root.join("staging/payload"), &prepared.files)?;
     verify_executable(&root.join("staging/payload").join(APP_EXE), &prepared.version)?;
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -171,6 +212,10 @@ fn launch_helper(root: &Path, plan: Plan) -> Result<(), String> {
 }
 
 pub fn startup() -> Result<Startup, String> {
+    startup_with_recovery(launch_helper)
+}
+
+fn startup_with_recovery(launch_recovery: impl FnOnce(&Path, Plan) -> Result<(), String>) -> Result<Startup, String> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().and_then(|s| s.to_str()) == Some("--apply-update") {
         if args.len() != 2 { return Err("Invalid restart helper arguments.".into()); }
@@ -195,7 +240,17 @@ pub fn startup() -> Result<Startup, String> {
         if acknowledge.is_some() { return Err("The update restart metadata is missing.".into()); }
         return Ok(Startup::Run { acknowledge: None, message: None, instance });
     }
-    let root = package::workspace(&install)?;
+    let root = match package::workspace(&install) {
+        Ok(root) => root,
+        Err(error) if acknowledge.is_none()
+            && !root_path.join("pending-backup").try_exists().unwrap_or(true)
+            && !root_path.join("install.lock.json").try_exists().unwrap_or(true) => {
+                // An unrelated or incomplete updater folder can disable
+                // updates without preventing the ordinary editor from opening.
+                return Ok(Startup::Run { acknowledge: None, message: Some(format!("App updates are unavailable: {error}")), instance });
+            }
+        Err(error) => return Err(error),
+    };
     if let Some(token) = acknowledge {
         let plan = Plan::read(&root)?;
         if plan.nonce != token || version(&plan.prepared.version)? != version(env!("CARGO_PKG_VERSION"))? || !check_lock(&root)? { return Err("The update restart could not be verified.".into()); }
@@ -203,8 +258,15 @@ pub fn startup() -> Result<Startup, String> {
         return Ok(Startup::Run { acknowledge: Some(token), message: Some(format!("Installed version {}. Finishing the restart check…", env!("CARGO_PKG_VERSION"))), instance });
     }
     if check_lock(&root)? { return Err("An app update is in progress. Wait for it to finish before opening another window.".into()); }
-    clear_empty_intent(&root)?;
     if root.join("pending-backup").exists() {
+        // Serialise recovery decisions with launches from a second shortcut
+        // and with ordinary update requests until the helper is ready.
+        let _guard = download_guard(&install)?;
+        if check_lock(&root)? { return Err("An app update is in progress. Wait for it to finish.".into()); }
+        clear_empty_intent(&root)?;
+        if !root.join("pending-backup").exists() {
+            return Ok(Startup::Run { acknowledge: None, message: None, instance });
+        }
         let previous = Plan::read(&root)?;
         if fs::read_to_string(root.join("installed.ready")).ok().as_deref() == Some(previous.nonce.as_str())
             && version(&previous.prepared.version)? == version(env!("CARGO_PKG_VERSION"))? {
@@ -221,7 +283,7 @@ pub fn startup() -> Result<Startup, String> {
         let mut plan = Plan::read(&root)?;
         plan.parent = native::current()?; plan.nonce = nonce(); plan.recovery = true;
         plan.helper_hash = package::hash_file(&std::env::current_exe().map_err(|e| e.to_string())?)?;
-        launch_helper(&root, plan)?;
+        launch_recovery(&root, plan)?;
         return Ok(Startup::Exit);
     }
     let message = if root.join("result.json").exists() { read_json(&root.join("result.json")).ok().and_then(|value| value["message"].as_str().map(|s| s.chars().take(1500).collect())) } else { None };
@@ -240,13 +302,9 @@ fn apply(root: &Path) -> Result<(), String> {
     let plan = Plan::read(root)?;
     let own_image = std::env::current_exe().map_err(|e| e.to_string())?;
     if package::hash_file(&own_image)? != plan.helper_hash { return Err("The restart helper changed after verification.".into()); }
-    if check_lock(root)? { return Err("Another restart helper is already running.".into()); }
     let parent = native::watch(plan.parent)?;
-    let own = native::current()?;
     let lock_path = root.join("install.lock.json");
-    let lock = fs::OpenOptions::new().write(true).create_new(true).open(&lock_path).map_err(|e| e.to_string())?;
-    drop(lock);
-    write_json(&lock_path, &serde_json::json!({"pid":own.pid,"created":own.created}))?;
+    claim_install(root)?;
     let mut parent_closed = false;
     let operation = (|| {
         if !plan.recovery {
@@ -271,7 +329,7 @@ fn apply(root: &Path) -> Result<(), String> {
         let installed = install_files(root, &plan.prepared).and_then(|_| verify_backup(&root.join("pending-backup")));
         if let Err(error) = installed {
             if root.join("pending-backup/journal.json").exists() { restore_pending(root, &plan.prepared.install)?; }
-            else if root.join("pending-backup").exists() { package::remove_owned(root, "pending-backup")?; }
+            else { clear_empty_intent(root)?; }
             write_result(root, &format!("The update was not installed; the previous version was restored. {error}"));
             return Ok(false);
         }
@@ -308,7 +366,7 @@ fn apply(root: &Path) -> Result<(), String> {
         let _ = package::remove_owned(root, "staging");
         Ok(true)
     })();
-    let _ = remove_file(&lock_path);
+    let _ = metadata_guard(root).and_then(|_guard| remove_file(&lock_path));
     match operation {
         Ok(true) => Ok(()),
         Ok(false) => {
@@ -338,9 +396,11 @@ fn install_files(root: &Path, prepared: &Prepared) -> Result<(), String> {
         let old = if target.exists() { Some((fs::metadata(&target).map_err(|e| e.to_string())?.len(), package::hash_file(&target)?)) } else { None };
         journal.records.push(Previous { file: file.clone(), old });
     }
-    // The entire intent is durable before the first original file is moved.
+    // Write the complete journal before the first managed file changes.
+    let next_journal = root.join("next-journal.json");
+    write_json(&next_journal, &journal.value())?;
     fs::create_dir(root.join("pending-backup")).map_err(|e| e.to_string())?;
-    write_json(&root.join("pending-backup/journal.json"), &journal.value())?;
+    fs::rename(next_journal, root.join("pending-backup/journal.json")).map_err(|e| e.to_string())?;
     for record in &journal.records {
         let target = package::checked_target(&prepared.install, &record.file.path, true)?;
         let source = package::checked_target(&payload, &record.file.path, false)?;
@@ -348,9 +408,25 @@ fn install_files(root: &Path, prepared: &Prepared) -> Result<(), String> {
             if fs::metadata(&target).map_err(|e| e.to_string())?.len() != *bytes || package::hash_file(&target)? != *hash { return Err("An installed file changed during the update.".into()); }
             let backup = package::checked_target(&root.join("pending-backup"), &record.file.path, true)?;
             if backup.exists() { return Err("An update backup file already exists.".into()); }
-            fs::rename(&target, backup).map_err(|e| format!("An app file is still in use or cannot be replaced: {e}"))?;
-        } else if target.exists() { return Err("A file appeared in the update destination.".into()); }
-        fs::rename(source, target).map_err(|e| format!("Cannot install an app file: {e}"))?;
+            // Keep the launch path present throughout both installation and
+            // rollback. A partial backup is harmless while the original lives.
+            use std::os::windows::fs::OpenOptionsExt;
+            // Deny writers while verifying the recovery copy. Windows
+            // requires closing this read handle before replacing the path.
+            let mut original = fs::OpenOptions::new().read(true).share_mode(0x1 | 0x4)
+                .open(&target).map_err(|e| e.to_string())?;
+            let mut copy = fs::File::create_new(&backup).map_err(|e| e.to_string())?;
+            let copied = std::io::copy(&mut original, &mut copy).map_err(|e| e.to_string())?;
+            copy.sync_all().map_err(|e| e.to_string())?;
+            drop(copy);
+            if copied != *bytes || package::hash_file(&backup)? != *hash {
+                return Err("Could not verify the original app file before replacing it.".into());
+            }
+            drop(original);
+            native::move_file(&source, &target, true)?;
+        } else {
+            native::move_file(&source, &target, false)?;
+        }
     }
     package::verify_files(&prepared.install, &prepared.files)
 }
@@ -380,17 +456,21 @@ fn restore_pending(root: &Path, install: &Path) -> Result<(), String> {
         let restore = (|| -> Result<(), String> {
             let target = package::checked_target(install, &record.file.path, true)?;
             let saved = package::checked_target(&backup, &record.file.path, true)?;
+            if let Some((bytes, hash)) = &record.old {
+                if target.exists() && fs::metadata(&target).map_err(|e| e.to_string())?.len() == *bytes && package::hash_file(&target)? == *hash { return Ok(()); }
+            }
             if saved.exists() {
                 package::plain_file(&saved)?;
                 let (bytes, hash) = record.old.as_ref().ok_or("Unexpected recovery file.")?;
                 if fs::metadata(&saved).map_err(|e| e.to_string())?.len() != *bytes || package::hash_file(&saved)? != *hash { return Err("An original recovery file was changed.".into()); }
                 if target.exists() {
                     if package::hash_file(&target)? != record.file.sha256 { return Err("A destination changed after installation; it was preserved for manual recovery.".into()); }
-                    fs::remove_file(&target).map_err(|e| e.to_string())?;
+                    native::move_file(&saved, &target, true)?;
+                } else {
+                    native::move_file(&saved, &target, false)?;
                 }
-                fs::rename(saved, target).map_err(|e| e.to_string())?;
-            } else if let Some((bytes, hash)) = &record.old {
-                if !target.exists() || fs::metadata(&target).map_err(|e| e.to_string())?.len() != *bytes || package::hash_file(&target)? != *hash { return Err("An original app file needs manual recovery.".into()); }
+            } else if record.old.is_some() {
+                return Err("An original app file needs manual recovery.".into());
             } else if target.exists() {
                 if package::hash_file(&target)? != record.file.sha256 { return Err("A newly installed file was changed; it was preserved for manual recovery.".into()); }
                 fs::remove_file(target).map_err(|e| e.to_string())?;
@@ -465,7 +545,7 @@ mod tests {
         fs::create_dir(root.join("rollback")).unwrap(); fs::write(root.join("rollback/retained.txt"), b"known good").unwrap();
         let lock = fs::OpenOptions::new().read(true).share_mode(1).open(install.join("sdk/component.dll")).unwrap();
         assert!(install_files(&root, &prepared).is_err());
-        // The executable had already moved, but the locked component had not.
+        // The executable was replaced, but the locked component was retained.
         assert_eq!(fs::read(install.join(APP_EXE)).unwrap(), b"next application");
         restore_pending(&root, &install).unwrap(); original(&install);
         assert_eq!(fs::read(root.join("rollback/retained.txt")).unwrap(), b"known good"); drop(lock); cleanup(install);
@@ -486,6 +566,65 @@ mod tests {
         write_json(&root.join("pending-backup/journal.json"), &Journal { source_version: "1.0.0".into(), records }.value()).unwrap();
         fs::rename(install.join(APP_EXE), root.join("pending-backup").join(APP_EXE)).unwrap();
         restore_pending(&root, &install).unwrap(); original(&install); cleanup(install);
+    }
+    #[test] fn normal_launcher_recovers_interrupted_replacement_and_legacy_empty_lock() {
+        // The child runs from the same path as a desktop shortcut. Substitute
+        // only the final helper launch, so the test can perform rollback once
+        // the child releases its mapped executable. No GUI is opened.
+        const PROBE: &str = "LABEL_STUDIO_TEST_LAUNCH_PHASE";
+        if let Ok(phase) = std::env::var(PROBE) {
+            assert_eq!(std::env::current_exe().unwrap().file_name().unwrap(), APP_EXE);
+            let mut called = false;
+            let outcome = startup_with_recovery(|_, plan| {
+                assert!(plan.recovery); called = true; Ok(())
+            }).unwrap();
+            assert_eq!(called, phase == "recovery");
+            assert_eq!(matches!(outcome, Startup::Exit), called);
+            if phase == "unowned" {
+                assert!(matches!(outcome, Startup::Run { message: Some(text), .. } if text.contains("updates are unavailable")));
+            }
+            return;
+        }
+        for locked_file in [APP_EXE, "sdk/component.dll"] {
+            let (install, root, mut prepared) = fixture();
+            let launcher = install.join(APP_EXE);
+            fs::copy(std::env::current_exe().unwrap(), &launcher).unwrap();
+            let staged = root.join("staging/payload").join(APP_EXE);
+            fs::copy(&launcher, &staged).unwrap();
+            // A PE permits trailing data. Both fixture versions launch through
+            // Windows, while their distinct digests exercise actual rollback.
+            use std::io::Write;
+            fs::OpenOptions::new().append(true).open(&staged).unwrap().write_all(b"next test build").unwrap();
+            let record = prepared.files.iter_mut().find(|r| r.path == APP_EXE).unwrap();
+            record.bytes = fs::metadata(&staged).unwrap().len(); record.sha256 = package::hash_file(&staged).unwrap();
+            let old = package::hash_file(&launcher).unwrap(); let next = record.sha256.clone();
+            let mut plan = Plan::read(&root).unwrap(); plan.prepared = prepared.clone(); plan.source_hash = old.clone();
+            write_json(&root.join("plan.json"), &plan.value()).unwrap();
+            let probe = |phase| {
+                let child = Command::new(&launcher).creation_flags(0x08000000)
+                    .args(["--exact", "updater::tests::normal_launcher_recovers_interrupted_replacement_and_legacy_empty_lock"])
+                    .env(PROBE, phase).output().unwrap();
+                assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stdout));
+            };
+            if locked_file == APP_EXE {
+                let marker = root.join("owner.txt");
+                let contents = fs::read(&marker).unwrap();
+                fs::remove_file(&marker).unwrap();
+                probe("unowned");
+                assert!(!marker.exists());
+                fs::write(&marker, contents).unwrap();
+            }
+            fs::write(root.join("install.lock.json"), b"").unwrap();
+            probe("run"); assert!(!root.join("install.lock.json").exists());
+            let lock = fs::OpenOptions::new().read(true).share_mode(1).open(install.join(locked_file)).unwrap();
+            assert!(install_files(&root, &prepared).is_err()); drop(lock);
+            assert_eq!(package::hash_file(&launcher).unwrap(), if locked_file == APP_EXE { &old } else { &next }.as_str());
+            probe("recovery");
+            restore_pending(&root, &install).unwrap();
+            assert_eq!(package::hash_file(&launcher).unwrap(), old);
+            probe("run");
+            cleanup(install);
+        }
     }
     #[test] fn external_changes_are_preserved_when_rollback_cannot_safely_replace_them() {
         let (install, root, prepared) = fixture(); install_files(&root, &prepared).unwrap();
@@ -532,6 +671,18 @@ mod tests {
         write_json(&root.join("install.lock.json"), &serde_json::json!({"pid":current.pid,"created":current.created+1})).unwrap(); assert!(!check_lock(&root).unwrap());
         assert!(!root.join("install.lock.json").exists()); cleanup(install);
     }
+    #[test] fn stale_malformed_lock_is_replaced_by_one_complete_owner() {
+        let (install, root, _) = fixture();
+        fs::write(root.join("install.lock.json"), b"{").unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let successes = std::thread::scope(|scope| {
+            let attempt = || { barrier.wait(); claim_install(&root).is_ok() };
+            let worker = scope.spawn(attempt);
+            usize::from(attempt()) + usize::from(worker.join().unwrap())
+        });
+        assert_eq!(successes, 1); assert!(check_lock(&root).unwrap());
+        cleanup(install);
+    }
     #[test] fn invalid_version_protocol_and_pe_metadata_are_rejected() {
         for value in ["1.2", "1.2.3-beta", "1.02.3", "65536.0.0", "../1.2.3", "1.2.3.4.5"] { assert!(version(value).is_err(), "{value}"); }
         assert_eq!(version("1.2.3").unwrap(), version("1.2.3.0").unwrap());
@@ -562,7 +713,18 @@ mod native {
         fn WaitForSingleObject(handle: Handle, timeout: u32) -> u32;
         fn CloseHandle(handle: Handle) -> i32;
         fn CreateMutexW(attributes: *const c_void, owner: i32, name: *const u16) -> Handle;
+        fn MoveFileExW(existing: *const u16, target: *const u16, flags: u32) -> i32;
         fn GetLastError() -> u32;
+    }
+    pub(super) fn move_file(source: &Path, target: &Path, replace: bool) -> Result<(), String> {
+        // Same-volume rename with write-through. Existing managed paths always
+        // name either their old or new file, including the main executable.
+        let source = wide(source.as_os_str()); let target = wide(target.as_os_str());
+        let flags = 0x8 | u32::from(replace); // MOVEFILE_WRITE_THROUGH | REPLACE_EXISTING
+        if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), flags) } == 0 {
+            return Err(format!("Cannot replace an application file: {}", std::io::Error::last_os_error()));
+        }
+        Ok(())
     }
     fn created(handle: Handle) -> Result<u64, String> {
         let (mut a, mut b, mut c, mut d) = (FileTime::default(), FileTime::default(), FileTime::default(), FileTime::default());
