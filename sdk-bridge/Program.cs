@@ -57,19 +57,40 @@ try
     if (request.Action == "inspect-layout" && request.Layout is not null) throw new InvalidOperationException("Layout inspection cannot submit a manual layout.");
     if (request.Width is not (6 or 9 or 12 or 19)) throw new InvalidOperationException("Select a valid tape width");
     XDocument doc;
+    // A rich-text run or a data-table cell can consist entirely of spaces.
+    const LoadOptions loadOptions = LoadOptions.PreserveWhitespace;
     if (request.TemplateBase64 is not null)
     {
         if (request.TemplateBase64.Length == 0 || request.TemplateBase64.Length > NativeLabelImport.MaximumBase64Length) throw new InvalidOperationException("Template snapshot is empty or too large");
         var templateBytes = Convert.FromBase64String(request.TemplateBase64);
         if (templateBytes.Length == 0 || templateBytes.Length > NativeLabelImport.MaximumBytes) throw new InvalidOperationException("Template snapshot is empty or too large");
         using var templateStream = new MemoryStream(templateBytes, false);
-        doc = XDocument.Load(templateStream, LoadOptions.None);
+        doc = XDocument.Load(templateStream, loadOptions);
     }
     else
     {
         if (string.IsNullOrWhiteSpace(request.Template) || !File.Exists(request.Template)) throw new InvalidOperationException("Template not found");
-        doc = XDocument.Load(request.Template, LoadOptions.None);
+        doc = XDocument.Load(request.Template, loadOptions);
     }
+    XElement? sourceTable = null;
+    if (request.Action == "export" && doc.Root is { } sourceRoot)
+    {
+        var tables = sourceRoot.Elements("DataTable").Take(2).ToArray();
+        if (tables.Length > 1) throw new InvalidOperationException("Multiple embedded data tables cannot be exported safely. Keep this document as a .420p project.");
+        sourceTable = tables.FirstOrDefault();
+        // Keep this outer Connect document data separate from label-object edits.
+        sourceTable?.Remove();
+    }
+    // Without xml:space, the SDK discards a whitespace-only text run on load.
+    static bool IsSpaceRun(XElement run) => run.Value.Length > 0 && string.IsNullOrWhiteSpace(run.Value);
+    static bool MarkSpaceRuns(XDocument xml)
+    {
+        var spaces = xml.Descendants("LabelObjects").Elements().SelectMany(o => o.Descendants("TextSpan").Elements("Text"))
+            .Where(IsSpaceRun).ToArray();
+        foreach (var span in spaces) span.SetAttributeValue(XNamespace.Xml + "space", "preserve");
+        return spaces.Length > 0;
+    }
+    var containsSpaceRuns = MarkSpaceRuns(doc);
     var name = doc.Descendants("LabelName").FirstOrDefault()?.Value ?? throw new InvalidOperationException("Template tape width is missing");
     if (!name.StartsWith($"{request.Width}MM", StringComparison.OrdinalIgnoreCase) && !name.StartsWith($"{request.Width}X", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException($"Template tape does not match the selected {request.Width} mm tape");
     // Frozen XML does not freeze values evaluated later by the SDK. Embedded
@@ -124,20 +145,29 @@ try
     var editableTextObjects = (request.NativeTemplate ? doc.Descendants("TextObject").Take(1) : doc.Descendants("TextObject")).ToArray();
     if (!request.PreserveTemplateFormatting)
     {
-    foreach (var colour in editableTextObjects.SelectMany(t => t.Descendants("FontBrush")).Descendants("Color"))
-    {
-        colour.SetAttributeValue("A", "1"); colour.SetAttributeValue("R", "0"); colour.SetAttributeValue("G", "0"); colour.SetAttributeValue("B", "0");
-    }
-    if (string.IsNullOrWhiteSpace(request.Font) || request.Font.Length > 128 || request.Font.Any(char.IsControl)) throw new InvalidOperationException("Invalid font");
-    foreach (var font in editableTextObjects.SelectMany(t => t.Descendants("FontInfo")))
-    {
-        font.Element("IsBold")?.SetValue(request.Bold ? "True" : "False");
-        font.Element("IsItalic")?.SetValue(request.Italic ? "True" : "False");
-        font.Element("IsUnderline")?.SetValue(request.Underline ? "True" : "False");
-        font.Element("FontName")?.SetValue(request.Font);
-    }
-    if (request.Align is not ("Left" or "Center" or "Right")) throw new InvalidOperationException("Invalid text alignment");
-    foreach (var alignment in editableTextObjects.SelectMany(t => t.DescendantsAndSelf("HorizontalAlignment"))) alignment.SetValue(request.Align);
+        if (string.IsNullOrWhiteSpace(request.Font) || request.Font.Length > 128 || request.Font.Any(char.IsControl)) throw new InvalidOperationException("Invalid font");
+        if (request.Align is not ("Left" or "Center" or "Right")) throw new InvalidOperationException("Invalid text alignment");
+        foreach (var text in editableTextObjects)
+        {
+            var fonts = text.Descendants("FontInfo").ToArray();
+            var original = fonts.FirstOrDefault();
+            void ApplyFontProperty(string property, string value, string fallback)
+            {
+                if (request.NativeTemplate && string.Equals(original?.Element(property)?.Value ?? fallback, value, StringComparison.OrdinalIgnoreCase)) return;
+                foreach (var font in fonts) font.Element(property)?.SetValue(value);
+            }
+            ApplyFontProperty("IsBold", request.Bold.ToString(), "False");
+            ApplyFontProperty("IsItalic", request.Italic.ToString(), "False");
+            ApplyFontProperty("IsUnderline", request.Underline.ToString(), "False");
+            ApplyFontProperty("FontName", request.Font, "Segoe UI");
+            if (!request.NativeTemplate)
+                foreach (var colour in text.Descendants("FontBrush").Descendants("Color"))
+                {
+                    colour.SetAttributeValue("A", "1"); colour.SetAttributeValue("R", "0"); colour.SetAttributeValue("G", "0"); colour.SetAttributeValue("B", "0");
+                }
+            if (!request.NativeTemplate || (text.Element("HorizontalAlignment")?.Value ?? "Center") != request.Align)
+                foreach (var alignment in text.DescendantsAndSelf("HorizontalAlignment")) alignment.SetValue(request.Align);
+        }
     }
     var label = DymoLabel.LabelSharedInstance;
     label.LoadLabelFromXML(doc.ToString(SaveOptions.DisableFormatting));
@@ -203,13 +233,19 @@ try
     // Keep this optional with the existing private geometry lookup, but reject
     // a clearly wrong internal height whenever the SDK exposes it.
     var geometryField = typeof(DymoLabel).GetField("_instanceLabel", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+    string? printIssue = null;
     if (geometryField?.GetValue(label) is DYMO.LabelAPI.Interfaces.ILabel<DYMO.LabelAPI.Interfaces.ILayoutManager> geometry)
     {
         label.GetPreviewLabel();
+        printIssue = PrintQrValidation.Check(geometry, label.Preview);
         var actualTapeWidthMm = (double)geometry.LabelSize.Height * 25.4;
         if (double.IsFinite(actualTapeWidthMm) && actualTapeWidthMm > 0 && Math.Abs(actualTapeWidthMm - request.Width) > 2.0)
             throw new InvalidOperationException($"Template tape geometry ({actualTapeWidthMm:F1} mm) does not match the selected {request.Width} mm tape. Choose a matching template.");
     }
+    else if (doc.Descendants("QRCodeObject").Any() || featureObjects.Any(o => string.Equals(o.Kind, "qr", StringComparison.OrdinalIgnoreCase)))
+        printIssue = "The printer-resolution QR geometry is unavailable.";
+    if (printIssue is not null && request.Action is "print" or "export")
+        throw new InvalidOperationException(printIssue);
     if (request.Action == "export")
     {
         if (label.GetPreviewLabel() is not { Length: > 0 } expectedPreview) throw new InvalidOperationException("The label cannot be rendered for export.");
@@ -222,7 +258,14 @@ try
         var sourceLabel = label as DymoLabel ?? throw new InvalidOperationException("This SDK cannot create an independent export label.");
         var exportLabel = sourceLabel.GetNewLabelInstance();
         if (ReferenceEquals(label, exportLabel)) throw new InvalidOperationException("The SDK could not create an independent export label.");
-        exportLabel.LoadLabelFromXML(resolvedXml);
+        var exportXml = resolvedXml;
+        if (containsSpaceRuns)
+        {
+            var resolved = XDocument.Parse(resolvedXml, LoadOptions.PreserveWhitespace);
+            MarkSpaceRuns(resolved);
+            exportXml = resolved.ToString(SaveOptions.DisableFormatting);
+        }
+        exportLabel.LoadLabelFromXML(exportXml);
         if (!exportLabel.GetPreviewLabel().AsSpan().SequenceEqual(expectedPreview))
             throw new InvalidOperationException("The exported label would differ from the verified preview.");
         // Save uses the SDK's public API. Never accept a caller-supplied file
@@ -235,6 +278,45 @@ try
             if (!exportLabel.Save(path)) throw new InvalidOperationException("DYMO could not export the label.");
             var size = new FileInfo(path).Length;
             if (size is <= 0 or > NativeLabelImport.MaximumBytes) throw new InvalidOperationException("The exported label is empty or larger than 16 MiB.");
+            if (sourceTable is not null || containsSpaceRuns)
+            {
+                var saved = XDocument.Load(path, LoadOptions.PreserveWhitespace);
+                if (saved.Root?.Name != "DesktopLabel") throw new InvalidOperationException("The SDK did not create a desktop label.");
+                var changedText = request.Text is null ? null : editableTextObjects.FirstOrDefault();
+                var originalTexts = containsSpaceRuns ? doc.Descendants("LabelObjects").Elements()
+                    .Where(o => !ReferenceEquals(o, changedText) && o.Descendants("TextSpan").Elements("Text").Any(IsSpaceRun)).ToArray() : [];
+                static XElement[] MatchingRuns(XDocument document, XElement original)
+                {
+                    var text = document.Descendants("LabelObjects").Elements(original.Name)
+                        .SingleOrDefault(t => t.Element("Name")?.Value == original.Element("Name")?.Value);
+                    return text?.Descendants("TextSpan").Elements("Text").ToArray() ?? [];
+                }
+                foreach (var original in originalTexts)
+                {
+                    var sourceRuns = original.Descendants("TextSpan").Elements("Text").ToArray();
+                    var savedRuns = MatchingRuns(saved, original);
+                    if (sourceRuns.Length != savedRuns.Length) throw new InvalidOperationException("The SDK changed the original text runs. Keep this file as a .420p project.");
+                    for (int i = 0; i < sourceRuns.Length; ++i)
+                        if (string.IsNullOrWhiteSpace(savedRuns[i].Value) && string.IsNullOrWhiteSpace(sourceRuns[i].Value))
+                            savedRuns[i].Value = sourceRuns[i].Value;
+                }
+                if (containsSpaceRuns) MarkSpaceRuns(saved);
+                if (sourceTable is not null)
+                {
+                    var outputTable = saved.Root.Elements("DataTable").SingleOrDefault();
+                    if (outputTable is null) saved.Root.Add(new XElement(sourceTable));
+                    else outputTable.ReplaceWith(new XElement(sourceTable));
+                }
+                saved.Save(path, SaveOptions.DisableFormatting);
+                if (new FileInfo(path).Length > NativeLabelImport.MaximumBytes) throw new InvalidOperationException("The exported label exceeds 16 MiB.");
+                var verified = XDocument.Load(path, LoadOptions.PreserveWhitespace);
+                if (sourceTable is not null && !XNode.DeepEquals(sourceTable, verified.Root?.Element("DataTable")))
+                    throw new InvalidOperationException("The saved data table differed from the source.");
+                foreach (var original in originalTexts)
+                    if (!original.Descendants("TextSpan").Elements("Text").Select(t => t.Value)
+                        .SequenceEqual(MatchingRuns(verified, original).Select(t => t.Value)))
+                        throw new InvalidOperationException("The SDK could not preserve the original text runs. Keep this file as a .420p project.");
+            }
             var bytes = File.ReadAllBytes(path);
             var restored = sourceLabel.GetNewLabelInstance();
             if (ReferenceEquals(label, restored) || ReferenceEquals(exportLabel, restored)) throw new InvalidOperationException("The SDK could not verify the exported label independently.");
@@ -289,12 +371,22 @@ try
         var standardPreview = label.Preview;
         var designPreview = request.IncludeDesign ? HighResolutionPreview.TryRender(label, standardPreview) : null;
         if (designPreview is not null && ((long)standardPreview.Length + designPreview.Length) * 4 / 3 > 30_000_000) designPreview = null;
-        Console.WriteLine(JsonSerializer.Serialize(new { ok = true, preview = Convert.ToBase64String(standardPreview), designPreview = designPreview is null ? null : Convert.ToBase64String(designPreview), lengthMm, canvasWidthMm, printableLengthMm, printableWidthMm, printableXmm, printableYmm, objects = objects.Select(o => o.Type.ToString()).ToArray(), objectLayouts, allLayouts, manualAdjustedObjects, emptyPrimaryText }));
+        Console.WriteLine(JsonSerializer.Serialize(new { ok = true, preview = Convert.ToBase64String(standardPreview), designPreview = designPreview is null ? null : Convert.ToBase64String(designPreview), lengthMm, canvasWidthMm, printableLengthMm, printableWidthMm, printableXmm, printableYmm, printIssue, objects = objects.Select(o => o.Type.ToString()).ToArray(), objectLayouts, allLayouts, manualAdjustedObjects, emptyPrimaryText }));
         return;
     }
     if (request.Copies is < 1 or > 100) throw new InvalidOperationException("Copies must be between 1 and 100");
+    // Recheck final rendered ink here as well as in the editor. An image path
+    // alone cannot establish that a thresholded image produced a printable dot.
+    using (var raster = SkiaSharp.SKBitmap.Decode(label.GetPreviewLabel()) ?? throw new InvalidOperationException("The print image is unavailable."))
+    {
+        var paper = raster.GetPixel(0, 0);
+        if (!raster.Pixels.Any(pixel => pixel.Alpha != 0 && pixel != paper))
+            throw new InvalidOperationException("The preview contains no printable ink.");
+    }
     if (!DevicePresence.Is420pPresent()) throw new InvalidOperationException("The 420P USB device is not connected");
     var printer = DymoPrinter.Instance.GetPrinters().FirstOrDefault(p => p.Name == "DYMO LabelManager 420P" && p.IsConnected) ?? throw new InvalidOperationException("The DYMO LabelManager 420P is not connected");
+    var currentStatus = DeviceStatus.ReadConnected();
+    if (currentStatus.PrintBlock is not null) throw new InvalidOperationException(string.Join(" ", currentStatus.Issues));
     var printed = await DymoPrinter.Instance.PrintLabel(label, printer.Name, request.Copies);
     if (!printed) throw new InvalidOperationException("DYMO did not accept the print job");
     Console.WriteLine(JsonSerializer.Serialize(new { ok = true }));

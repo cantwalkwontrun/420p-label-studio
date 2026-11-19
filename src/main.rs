@@ -57,6 +57,7 @@ impl PreviewContextTarget {
 }
 
 struct LabelApp {
+    app_window: Option<std::sync::Arc<updater::WindowRegistration>>,
     app_update_repository: String,
     app_update_status: String,
     app_update_release: Option<app_updates::Release>,
@@ -99,8 +100,9 @@ struct LabelApp {
     empty_primary_text: Option<String>,
     pending_move: Option<canvas_layout::MoveVisual>,
     preview_paper: Color32,
-    native_preview_has_ink: bool,
-    document_generation: u64,
+    preview_has_ink: bool,
+    preview_print_issue: Option<String>,
+    preview_generation: u64,
     design_mode: bool,
     design_image: Option<egui::TextureHandle>,
     design_image_key: String,
@@ -170,7 +172,7 @@ struct LabelApp {
 impl Default for LabelApp {
     fn default() -> Self {
         let template_path = built_in_template(9).unwrap_or_default();
-        let mut app = Self { app_update_repository: app_updates::DEFAULT_REPOSITORY.to_owned(), app_update_status: "Check GitHub for the latest app release.".into(), app_update_release: None, app_update_receiver: None, app_update_download: None, app_update_cancel: None, app_update_prepared: None, app_update_progress: None, app_update_install_receiver: None, app_update_restarting: false, app_update_acknowledge: None, app_update_exit_after_download: false, app_update_startup_checked: false, app_update_dismissed_version: None, app_update_startup_message: None, app_update_scroll_requested: false, model_picture: None, export_receiver: None, text: String::new(), width_mm: 9, copies: 1, service_status: "Not checked".into(), status_receiver: None, device_status: None, device_status_time: None, template_path, native_template: None, native_import_receiver: None, conversion_receiver: None, label_converter: label_conversion::Converter::default(), preview_receiver: None, preview_image: None, highres_design: None, preview_dimensions: None, printable_dimensions: None, printable_origin: None, preview_snapshot: None, preview_objects: None, all_layouts: None, empty_primary_text: None, pending_move: None, preview_paper: Color32::WHITE, native_preview_has_ink: false, document_generation: 0, design_mode: true, design_image: None, design_image_key: String::new(), design_image_receiver: None, right_click_selection: None, preview_context_target: None, show_rulers: true, metric_units: true, show_about: false, show_preferences: false, appearance: appearance::Appearance::default(), settings_message: String::new(), association_worker: None, show_tips: false, show_layout: false, show_guides: false, fit_requested: false, features: features::Features::default(), layout: layout_tools::LayoutState::default(), guides: guides::Guides::default(), canvas: canvas_layout::CanvasInteraction::default(), known_features: Vec::new(), known_image: false, removed_objects: Vec::new(), object_layouts: Vec::new(), project_path: None, saved_disk_snapshot: None, saved_key: String::new(), pending_document_action: None, data_tools: data_tools::DataTools::default(), prepared_batch: Vec::new(), show_batch: false, batch_selected: 0, batch_preview_receiver: None, batch_preview_key: None, batch_preview_texture: None, batch_status: String::new(), allow_close: false, preview_status: "Generate a preview to see the label.".into(), preview_base_key: None, threshold_image_blank: false, image_path: String::new(), black_and_white: true, threshold: 128, preview_key: None, pending_key: None, print_receiver: None, print_cancel: None, print_status: String::new(), connected: None, bold: false, italic: false, underline: false, font: "Segoe UI".into(), fonts: vec!["Segoe UI".into(), "Arial".into(), "Calibri".into()], fonts_receiver: None, align: "Center".into(), next_status_check: std::time::Instant::now(), file_status: String::new(), observed_key: String::new(), preview_due: None, zoom: 2.0, tray: None, tray_error: None };
+        let mut app = Self { app_window: None, app_update_repository: app_updates::DEFAULT_REPOSITORY.to_owned(), app_update_status: "Check GitHub for the latest app release.".into(), app_update_release: None, app_update_receiver: None, app_update_download: None, app_update_cancel: None, app_update_prepared: None, app_update_progress: None, app_update_install_receiver: None, app_update_restarting: false, app_update_acknowledge: None, app_update_exit_after_download: false, app_update_startup_checked: false, app_update_dismissed_version: None, app_update_startup_message: None, app_update_scroll_requested: false, model_picture: None, export_receiver: None, text: String::new(), width_mm: 9, copies: 1, service_status: "Not checked".into(), status_receiver: None, device_status: None, device_status_time: None, template_path, native_template: None, native_import_receiver: None, conversion_receiver: None, label_converter: label_conversion::Converter::default(), preview_receiver: None, preview_image: None, highres_design: None, preview_dimensions: None, printable_dimensions: None, printable_origin: None, preview_snapshot: None, preview_objects: None, all_layouts: None, empty_primary_text: None, pending_move: None, preview_paper: Color32::WHITE, preview_has_ink: false, preview_print_issue: None, preview_generation: 0, design_mode: true, design_image: None, design_image_key: String::new(), design_image_receiver: None, right_click_selection: None, preview_context_target: None, show_rulers: true, metric_units: true, show_about: false, show_preferences: false, appearance: appearance::Appearance::default(), settings_message: String::new(), association_worker: None, show_tips: false, show_layout: false, show_guides: false, fit_requested: false, features: features::Features::default(), layout: layout_tools::LayoutState::default(), guides: guides::Guides::default(), canvas: canvas_layout::CanvasInteraction::default(), known_features: Vec::new(), known_image: false, removed_objects: Vec::new(), object_layouts: Vec::new(), project_path: None, saved_disk_snapshot: None, saved_key: String::new(), pending_document_action: None, data_tools: data_tools::DataTools::default(), prepared_batch: Vec::new(), show_batch: false, batch_selected: 0, batch_preview_receiver: None, batch_preview_key: None, batch_preview_texture: None, batch_status: String::new(), allow_close: false, preview_status: "Generate a preview to see the label.".into(), preview_base_key: None, threshold_image_blank: false, image_path: String::new(), black_and_white: true, threshold: 128, preview_key: None, pending_key: None, print_receiver: None, print_cancel: None, print_status: String::new(), connected: None, bold: false, italic: false, underline: false, font: "Segoe UI".into(), fonts: vec!["Segoe UI".into(), "Arial".into(), "Calibri".into()], fonts_receiver: None, align: "Center".into(), next_status_check: std::time::Instant::now(), file_status: String::new(), observed_key: String::new(), preview_due: None, zoom: 2.0, tray: None, tray_error: None };
         app.saved_key = app.document_key();
         app
     }
@@ -491,12 +493,16 @@ impl LabelApp {
     }
 
     fn has_print_content(&self) -> bool {
+        if self.preview_image.is_some() && self.preview_key.as_ref() == Some(&self.key()) { return self.preview_has_ink; }
         !self.text.trim().is_empty() || !self.image_path.trim().is_empty() || !self.features.is_empty()
-            || (self.native_template.is_some() && self.native_preview_has_ink && self.preview_key.as_ref() == Some(&self.key()))
+    }
+
+    fn device_print_block(&self) -> Option<&sdk::PrintBlock> {
+        self.device_status.as_ref()?.print_block.as_ref()
     }
 
     fn can_print(&self) -> bool {
-        self.has_print_content()
+        self.has_print_content() && self.preview_print_issue.is_none() && self.device_print_block().is_none()
             && self.connected == Some(true) && self.preview_key.as_ref() == Some(&self.key())
             && self.preview_receiver.is_none() && self.print_receiver.is_none() && !self.canvas.is_dragging() && self.preview_snapshot.is_some() && self.preview_objects.is_some()
             && ((self.features.is_empty() && !self.layout.is_manual()) || !self.design_mode)
@@ -535,7 +541,7 @@ impl LabelApp {
         self.print_status = format!("Checking {} labels before printing…", jobs.len());
         std::thread::spawn(move || {
             let result = batch::run(&jobs, &cancel,
-                |job| sdk::preview_snapshot(snapshot.clone(), job.text.clone(), job.objects.clone()).map(|_| ()),
+                |job| sdk::preview_snapshot(snapshot.clone(), job.text.clone(), job.objects.clone()).and_then(|preview| preview.check_printable()),
                 |job, _| sdk::print_snapshot(&snapshot, job.text.clone(), 1, job.objects.clone()),
                 |progress| { let _ = send.send(PrintEvent::Progress(progress)); });
             let _ = send.send(PrintEvent::BatchDone(result));
@@ -555,8 +561,18 @@ impl LabelApp {
         }).collect()
     }
 
+    fn invalidate_batch_preview(&mut self) {
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.batch_preview_receiver = None;
+        self.batch_preview_key = None;
+        self.batch_preview_texture = None;
+        if !self.prepared_batch.is_empty() {
+            self.batch_status = "Preview the selected row again to check the updated label.".into();
+        }
+    }
+
     fn batch_key(&self) -> String {
-        format!("{:?}", (self.document_generation, self.key(), self.batch_selected, self.prepared_batch.get(self.batch_selected)))
+        format!("{:?}", (self.preview_generation, self.key(), self.batch_selected, self.prepared_batch.get(self.batch_selected)))
     }
 
     fn preview_batch_row(&mut self) {
@@ -575,7 +591,7 @@ impl LabelApp {
     }
 
     fn queue_prepared_batch(&mut self) {
-        if self.connected != Some(true) || self.print_receiver.is_some() || self.canvas.is_dragging() || self.preview_key.as_ref() != Some(&self.key()) || self.batch_preview_key.as_ref() != Some(&self.batch_key()) {
+        if self.connected != Some(true) || self.device_print_block().is_some() || self.print_receiver.is_some() || self.canvas.is_dragging() || self.preview_key.as_ref() != Some(&self.key()) || self.batch_preview_key.as_ref() != Some(&self.batch_key()) {
             self.batch_status = "Connect the 420P and preview the selected row before printing.".into(); return;
         }
         let Some(snapshot) = self.preview_snapshot.clone() else { self.batch_status = "Generate the label preview first.".into(); return; };
@@ -699,6 +715,7 @@ impl LabelApp {
     }
     fn document_key(&self) -> String { format!("{:?}", (self.key(), self.guides.save_value())) }
     fn start_preview(&mut self) {
+        self.invalidate_batch_preview();
         let key = self.key();
         let objects = match self.features.capture_request(self.width_mm) {
             Ok(value) => value.as_array().cloned().unwrap_or_default(),
@@ -750,8 +767,9 @@ impl LabelApp {
         });
     }
     fn project_bytes(&self) -> Result<Vec<u8>, String> {
+        let objects = self.features.project_value()?;
         let template = if built_in_template(self.width_mm).as_ref() == Some(&self.template_path) { format!("builtin:{}", self.width_mm) } else { self.template_path.clone() };
-        let value = serde_json::json!({"version":if self.native_template.is_some() {2} else {1},"text":self.text,"width":self.width_mm,"template":template,"image":self.image_path,"monochrome":self.black_and_white,"threshold":self.threshold,"bold":self.bold,"italic":self.italic,"underline":self.underline,"font":self.font,"align":self.align,"objects":self.features.save_value(),"layout":self.layout.save_value(),"guides":self.guides.save_value(),"pendingLayoutRemovals":self.removed_objects,"nativeTemplate":self.native_template.as_ref().map(|n| n.value())});
+        let value = serde_json::json!({"version":if self.native_template.is_some() {2} else {1},"text":self.text,"width":self.width_mm,"template":template,"image":self.image_path,"monochrome":self.black_and_white,"threshold":self.threshold,"bold":self.bold,"italic":self.italic,"underline":self.underline,"font":self.font,"align":self.align,"objects":objects,"layout":self.layout.save_value(),"guides":self.guides.save_value(),"pendingLayoutRemovals":self.removed_objects,"nativeTemplate":self.native_template.as_ref().map(|n| n.value())});
         let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
         if bytes.len() > project_io::PROJECT_LIMIT { return Err("The project exceeds the 24 MiB limit.".into()); }
         Ok(bytes)
@@ -775,7 +793,7 @@ impl LabelApp {
         if destination_contents(path)? != previous {
             return Err("The label file changed while preparing the save. Choose another file to avoid overwriting those changes.".into());
         }
-        project_io::write_project(path, &bytes, previous.is_some())?;
+        project_io::write_checked(path, &bytes, previous.as_deref(), |_| Ok(()))?;
         self.project_path = Some(path.to_owned());
         self.saved_disk_snapshot = Some(bytes);
         self.saved_key = self.document_key();
@@ -787,7 +805,7 @@ impl LabelApp {
         let current = project_io::read_label(path).map_err(|e| format!("Could not read the existing label: {e}"))?;
         if self.saved_disk_snapshot.as_ref() != Some(&current) { return Err("The label file changed outside this app. Use Save as to avoid overwriting those changes.".into()); }
         let bytes = self.project_bytes()?;
-        project_io::write_project(path, &bytes, true)?;
+        project_io::write_checked(path, &bytes, Some(&current), |_| Ok(()))?;
         self.saved_disk_snapshot = Some(bytes);
         self.saved_key = self.document_key();
         Ok(())
@@ -812,11 +830,9 @@ impl LabelApp {
         else { self.perform_document_action(action, ctx); }
     }
     fn reset_document_views(&mut self) {
-        self.document_generation = self.document_generation.wrapping_add(1);
+        self.invalidate_batch_preview();
         self.prepared_batch.clear();
         self.batch_selected = 0;
-        self.batch_preview_key = None;
-        self.batch_preview_texture = None;
         self.batch_status.clear();
         self.show_batch = false;
         self.preview_image = None;
@@ -838,7 +854,8 @@ impl LabelApp {
         self.design_image = None;
         self.design_image_key.clear();
         self.preview_base_key = None;
-        self.native_preview_has_ink = false;
+        self.preview_has_ink = false;
+        self.preview_print_issue = None;
         self.threshold_image_blank = false;
         self.preview_status = "Generate a preview to see the label.".into();
         self.observed_key.clear();
@@ -884,9 +901,10 @@ impl LabelApp {
                 }
                 let Some(prepared) = self.app_update_prepared.clone() else { self.app_update_status = "Download and verify an update first.".into(); return; };
                 let (send, receive) = std::sync::mpsc::channel();
+                let Some(window) = self.app_window.clone() else { self.app_update_status = "Cannot verify the current app window for restart.".into(); return; };
                 self.app_update_install_receiver = Some(receive); self.app_update_restarting = true;
                 self.app_update_status = "Preparing the verified restart. Your current app will stay open if this fails.".into();
-                std::thread::spawn(move || { let _ = send.send(updater::start(&prepared)); });
+                std::thread::spawn(move || { let _ = send.send(updater::start(&prepared, &window)); });
             }
         }
     }
@@ -1151,7 +1169,7 @@ impl LabelApp {
                     Ok((path, Ok(native))) => { self.native_import_receiver = None; self.apply_native_label(&path, native); recents::record(&path); ui.ctx().data_mut(|data| data.remove::<egui::text_edit::TextEditState>(egui::Id::new("label-text-editor"))); }
                     Ok((_, Err(error))) => { self.native_import_receiver = None; self.file_status = format!("Could not open DYMO label: {error}"); }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.native_import_receiver = None; self.file_status = "The DYMO import worker stopped; the current label was kept.".into(); }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => { if ui.input(|i| i.viewport().close_requested()) { ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose); } ui.spinner(); ui.label("Opening DYMO label…"); ui.ctx().request_repaint_after(std::time::Duration::from_millis(100)); return; }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => { ui.spinner(); ui.label("Opening DYMO label…"); ui.ctx().request_repaint_after(std::time::Duration::from_millis(100)); return; }
                 }
             }
             while let Some(result) = self.conversion_receiver.as_ref().map(|receiver| receiver.try_recv()) {
@@ -1167,7 +1185,6 @@ impl LabelApp {
             }
             ui.painter().rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
             if self.app_update_restarting {
-                if ui.input(|input| input.viewport().close_requested()) && !self.allow_close { ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose); }
                 let received = self.app_update_install_receiver.as_ref().map(|receiver| receiver.try_recv());
                 match received {
                     Some(Ok(Ok(()))) => { self.app_update_install_receiver = None; self.allow_close = true; ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close); }
@@ -1183,22 +1200,6 @@ impl LabelApp {
             self.poll_app_update_download(ui.ctx());
             let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect::<Vec<_>>());
             if let Some(path) = dropped.first().filter(|_| dropped.len() == 1) { if startup_label_path([path.clone().into_os_string()]).is_some() { self.request_document_action(PendingDocumentAction::Open(path.clone()), ui.ctx()); } }
-            if ui.input(|input| input.viewport().close_requested()) && !self.allow_close {
-                if self.conversion_receiver.is_some() { ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose); self.file_status = "Wait for label conversion to finish before closing.".into(); }
-                else if self.app_update_download.is_some() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    self.request_document_action(PendingDocumentAction::Exit, ui.ctx());
-                } else if self.print_receiver.is_some() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    self.print_status = "Wait for the current print job to finish, or cancel remaining labels, before exiting.".into();
-                } else if self.export_receiver.is_some() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    self.file_status = "Wait for the DYMO label export to finish before exiting.".into();
-                } else if self.document_key() != self.saved_key || self.data_tools.has_unsaved_contacts() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    if self.pending_document_action.is_none() { self.pending_document_action = Some(PendingDocumentAction::Exit); }
-                }
-            }
             if self.pending_document_action.is_none() {
                 let action = ui.input_mut(|input| {
                     if input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::S) { Some(toolbar::Action::SaveAs) }
@@ -1298,8 +1299,8 @@ impl LabelApp {
                                 let [r, g, b, a] = image.get_pixel(0, 0).0;
                                 self.preview_paper = if a == 0 { Color32::WHITE } else { Color32::from_rgb(r, g, b) };
                             }
-                            self.native_preview_has_ink = self.native_template.is_some() && image.pixels().next().is_some_and(|paper|
-                                image.pixels().any(|pixel| pixel[3] != 0 && pixel != paper));
+                            self.preview_has_ink = sdk::image_has_ink(&image);
+                            self.preview_print_issue = preview.print_issue;
                             let size = [image.width() as usize, image.height() as usize];
                             let pixels = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
                             self.preview_image = Some(ui.ctx().load_texture("dymo-preview", pixels, egui::TextureOptions::NEAREST));
@@ -1320,11 +1321,14 @@ impl LabelApp {
                 match receiver.try_recv() {
                     Ok((key, Ok(preview))) => {
                         if key == self.batch_key() {
+                            let printable = preview.check_printable();
                             let image = preview.image;
                             let pixels = egui::ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw());
                             self.batch_preview_texture = Some(ui.ctx().load_texture("batch-preview", pixels, egui::TextureOptions::NEAREST));
-                            self.batch_preview_key = Some(key);
-                            self.batch_status = "Row rendered by DYMO. Every batch row will be checked before any are sent.".into();
+                            match printable {
+                                Ok(()) => { self.batch_preview_key = Some(key); self.batch_status = "Row rendered by DYMO. Every batch row will be checked before any are sent.".into(); }
+                                Err(issue) => { self.batch_preview_key = None; self.batch_status = issue; }
+                            }
                         } else if !self.prepared_batch.is_empty() { self.batch_status = "The label or selected row changed; preview it again.".into(); }
                         self.batch_preview_receiver = None;
                     }
@@ -1669,7 +1673,10 @@ impl LabelApp {
             let print_button = ui.horizontal_wrapped(|ui| {
                 let button = ui.add_enabled(can_print, egui::Button::new(RichText::new("        Print label").strong().color(icon_colour))
                     .fill(button_colour).min_size(Vec2::new(150.0, 40.0)));
-                if !has_content { ui.label("Add text or an image before printing."); }
+                if let Some(issue) = self.preview_print_issue.as_ref().filter(|_| self.preview_key.as_ref() == Some(&self.key())) { ui.label(issue); }
+                else if !has_content && self.preview_image.is_some() && self.preview_key.as_ref() == Some(&self.key()) { ui.label("The preview contains no printable ink."); }
+                else if !has_content { ui.label("Add text or an image before printing."); }
+                else if let Some(block) = self.device_print_block() { ui.label(block.message()); }
                 else if self.connected != Some(true) { ui.label("Connect the 420P and check its status before printing."); }
                 else if (!self.features.is_empty() || self.layout.is_manual()) && self.design_mode { ui.label("Select DYMO print preview to check the objects before printing."); }
                 else if !can_print { ui.label("Generate a current preview before printing."); }
@@ -1828,7 +1835,7 @@ impl LabelApp {
                                 egui::ScrollArea::horizontal().show(ui, |ui| { ui.add(egui::Image::new(image).fit_to_exact_size(image.size_vec2() * 2.0)); });
                             }
                         }
-                        let ready = self.connected == Some(true) && self.print_receiver.is_none() && !self.canvas.is_dragging() && self.preview_key.as_ref() == Some(&self.key()) && preview_is_current;
+                        let ready = self.connected == Some(true) && self.device_print_block().is_none() && self.print_receiver.is_none() && !self.canvas.is_dragging() && self.preview_key.as_ref() == Some(&self.key()) && preview_is_current;
                         print = ui.add_enabled(ready, egui::Button::new("Print batch")).on_disabled_hover_text("Connect the 420P and preview the selected row first.").clicked();
                     }
                     ui.label(&self.batch_status);
@@ -1939,6 +1946,27 @@ impl LabelApp {
 }
 
 impl eframe::App for LabelApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // eframe runs this hook even when a minimised window does not draw.
+        if self.allow_close || !ctx.input(|input| input.viewport().close_requested()) {
+            return;
+        }
+        if !self.app_update_restarting && self.native_import_receiver.is_none() {
+            if self.app_update_download.is_some() || self.export_receiver.is_some()
+                || self.conversion_receiver.is_some() || self.print_receiver.is_some() {
+                self.request_document_action(PendingDocumentAction::Exit, ctx);
+            } else if self.document_key() != self.saved_key || self.data_tools.has_unsaved_contacts() {
+                self.pending_document_action.get_or_insert(PendingDocumentAction::Exit);
+            } else {
+                return;
+            }
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
         if let Some(token) = self.app_update_acknowledge.take() {
@@ -2022,12 +2050,9 @@ fn startup_label_path(args: impl IntoIterator<Item=std::ffi::OsString>) -> Optio
 fn open_label_dialog() -> rfd::FileDialog { rfd::FileDialog::new().add_filter("Label files", &["420p", "dymo", "label"]).add_filter("420P projects", &["420p"]).add_filter("DYMO labels", &["dymo", "label"]) }
 
 fn write_native_label(path: &std::path::Path, bytes: &[u8], previous: Option<&[u8]>) -> Result<(), String> {
-    project_io::write_checked(path, bytes, previous.is_some(), |staged| {
+    project_io::write_checked(path, bytes, previous, |staged| {
         let native = native_labels::read(staged)?;
         sdk::native_preview(native).map_err(|error| format!("Studio could not preview the saved DYMO label: {error}"))?;
-        if destination_contents(path)?.as_deref() != previous {
-            return Err("The destination changed while preparing the label. Choose another file to preserve those changes.".into());
-        }
         Ok(())
     })
 }
@@ -2039,7 +2064,7 @@ fn convert_label_file(source: &std::path::Path, target: &std::path::Path, direct
             let native = native_labels::read(source)?;
             document.apply_native_label(source, native);
             let expected = document.project_bytes()?;
-            project_io::write_checked(target, &expected, false, |staged| {
+            project_io::write_checked(target, &expected, None, |staged| {
                 let mut reopened = LabelApp::default();
                 reopened.load_project(staged)?;
                 if reopened.project_bytes()? != expected { return Err("The converted project did not retain its contents; original kept.".into()); }
@@ -2122,7 +2147,7 @@ mod project_tests {
     fn printer_status_updates_do_not_change_the_label_or_retain_stale_details() {
         let mut app = LabelApp { text: "Keep this label".into(), ..Default::default() };
         let document = app.document_key();
-        let connected = sdk::DeviceStatus { connected: true, available: true, battery_percent: Some(75), charging: Some(true), tape_width_mm: Some(9), issues: vec![], message: None };
+        let connected = sdk::DeviceStatus { connected: true, available: true, battery_percent: Some(75), charging: Some(true), tape_width_mm: Some(9), issues: vec![], print_block: None, message: None };
         app.apply_device_status(Ok(connected.clone()));
         assert_eq!(app.service_status, "Connected");
         assert!(app.device_status_time.is_some());
@@ -2144,7 +2169,7 @@ mod project_tests {
     fn printer_details_render_in_compact_and_settings_views() {
         let mut app = LabelApp::default();
         for status in [
-            sdk::DeviceStatus { connected: true, available: true, battery_percent: Some(75), charging: Some(true), tape_width_mm: Some(12), issues: vec!["Synthetic printer error".into()], message: None },
+            sdk::DeviceStatus { connected: true, available: true, battery_percent: Some(75), charging: Some(true), tape_width_mm: Some(12), issues: vec!["Synthetic printer error".into()], print_block: None, message: None },
             sdk::DeviceStatus::unavailable(), sdk::DeviceStatus::disconnected(),
         ] {
             app.apply_device_status(Ok(status));
@@ -2332,6 +2357,37 @@ mod project_tests {
         std::fs::remove_file(path).unwrap(); std::fs::remove_file(project).unwrap();
     }
     #[test]
+    fn native_export_preserves_embedded_table_and_whitespace_only_rich_text_runs() {
+        let (Ok(fixtures), Ok(_)) = (std::env::var("DYMO_TEST_TEMPLATE_DIR"), std::env::var("DYMO_TEST_BRIDGE")) else { return; };
+        let dir = project_io::create_staging_dir(&std::env::temp_dir()).unwrap();
+        let native = dir.join("source.dymo");
+        let project = dir.join("converted.420p");
+        let restored = dir.join("restored.dymo");
+        let text = include_str!("../sdk-bridge/default-text.xml");
+        let span = &text[text.find("<TextSpan>").unwrap()..text.find("</TextSpan>").unwrap() + "</TextSpan>".len()];
+        let runs: String = ["A", "   ", "B"].iter().map(|value| span.replace("<Text />", &format!("<Text>{value}</Text>"))).collect();
+        let source = std::fs::read_to_string(std::path::Path::new(&fixtures).join("9mm.dymo")).unwrap()
+            .replace("<LabelObjects />", &format!("<LabelObjects>{}</LabelObjects>", text.replace(span, &runs)))
+            .replace("<Columns></Columns>", "<Columns><Column>Sample</Column></Columns>")
+            .replace("<Rows></Rows>", "<Rows><Row><Cell>  </Cell></Row><Row><Cell>A &amp; B</Cell></Row></Rows>");
+        std::fs::write(&native, &source).unwrap();
+        let original = native_labels::read(&native).unwrap();
+        assert_eq!(original.text, "A   B");
+        let expected_preview = sdk::native_preview(original).unwrap().image;
+        convert_label_file(&native, &project, label_conversion::Direction::ToProject).unwrap();
+        convert_label_file(&project, &restored, label_conversion::Direction::ToDymo).unwrap();
+        let exported = std::fs::read_to_string(&restored).unwrap();
+        assert!(exported.contains("<Column>Sample</Column>"));
+        assert!(exported.contains("<Cell>  </Cell>"));
+        assert!(exported.contains("<Cell>A &amp; B</Cell>"));
+        let reopened = native_labels::read(&restored).unwrap();
+        assert_eq!(reopened.text, "A   B");
+        assert_eq!(sdk::native_preview(reopened).unwrap().image, expected_preview);
+        assert_eq!(std::fs::read_to_string(&native).unwrap(), source);
+        for path in [native, project, restored] { std::fs::remove_file(path).unwrap(); }
+        std::fs::remove_dir(dir).unwrap();
+    }
+    #[test]
     fn large_native_image_roundtrips_through_checked_save_and_project_conversion() {
         let (Ok(fixtures), Ok(_)) = (std::env::var("DYMO_TEST_TEMPLATE_DIR"), std::env::var("DYMO_TEST_BRIDGE")) else { return; };
         let dir = std::env::temp_dir().join(format!("420p-large-image-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -2454,6 +2510,57 @@ mod project_tests {
         assert!(tested > 0, "supply at least one private native fixture");
         println!("Verified {tested} original DYMO labels and converted projects without changing the originals.");
     }
+    #[test]
+    fn close_guard_runs_without_drawing_a_minimised_editor() {
+        let check_close = |app: &mut LabelApp, minimised| {
+            let ctx = egui::Context::default();
+            let mut raw = egui::RawInput::default();
+            let viewport = raw.viewports.entry(egui::ViewportId::ROOT).or_default();
+            viewport.minimized = Some(minimised);
+            viewport.events.push(egui::ViewportEvent::Close);
+            let mut frame = eframe::Frame::_new_kittest();
+            if minimised {
+                let mut output = ctx.run_logic(&raw, |ctx| eframe::App::logic(app, ctx, &mut frame));
+                return output.viewport_commands.remove(&egui::ViewportId::ROOT).unwrap_or_default();
+            }
+            let output = ctx.run_ui(raw, |ui| eframe::App::logic(app, ui.ctx(), &mut frame));
+            output.viewport_output[&egui::ViewportId::ROOT].commands.clone()
+        };
+        for minimised in [true, false] {
+            let mut app = LabelApp::default();
+            assert!(!check_close(&mut app, minimised).contains(&egui::ViewportCommand::CancelClose));
+            app.text = "Unsaved label".into();
+            let commands = check_close(&mut app, minimised);
+            assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+            assert!(commands.contains(&egui::ViewportCommand::Minimized(false)));
+            assert!(matches!(app.pending_document_action, Some(PendingDocumentAction::Exit)));
+            app.allow_close = true;
+            assert!(!check_close(&mut app, minimised).contains(&egui::ViewportCommand::CancelClose));
+        }
+        let mut printing = LabelApp::default();
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        printing.print_receiver = Some(receiver);
+        assert!(check_close(&mut printing, true).contains(&egui::ViewportCommand::CancelClose));
+        assert!(printing.print_status.contains("print job"));
+    }
+
+    #[test]
+    fn refreshing_the_same_label_invalidates_ready_and_in_flight_batch_rows() {
+        let mut app = LabelApp::default();
+        app.prepared_batch = vec!["Recipient".into()];
+        app.preview_key = Some(app.key());
+        app.batch_preview_key = Some(app.batch_key());
+        let previous = app.batch_key();
+        let (old_worker, receiver) = std::sync::mpsc::channel();
+        app.batch_preview_receiver = Some(receiver);
+        let before_refresh = app.document_key();
+        app.start_preview();
+        assert_eq!(before_refresh, app.document_key());
+        assert_ne!(previous, app.batch_key());
+        assert!(app.batch_preview_key.is_none() && app.batch_preview_receiver.is_none());
+        assert!(old_worker.send((previous, Err("old result".into()))).is_err());
+    }
+
     #[test]
     fn final_exit_guard_preserves_a_print_started_after_the_unsaved_prompt() {
         let mut app = LabelApp::default();
@@ -2721,6 +2828,30 @@ mod project_tests {
         });
     }
     #[test]
+    fn print_readiness_uses_final_ink_and_confirmed_printer_faults() {
+        let mut app = LabelApp { connected: Some(true), image_path: "synthetic.png".into(), ..Default::default() };
+        app.preview_key = Some(app.key());
+        app.preview_snapshot = Some(sdk::test_snapshot());
+        app.preview_objects = Some(vec![]);
+        let ctx = egui::Context::default();
+        app.preview_image = Some(ctx.load_texture("blank", egui::ColorImage::filled([1, 1], Color32::WHITE), egui::TextureOptions::NEAREST));
+        assert!(!app.can_print());
+        app.preview_has_ink = true;
+        assert!(app.can_print());
+        for fault in [sdk::PrintBlock::NoCassette, sdk::PrintBlock::LowPower, sdk::PrintBlock::PrinterError] {
+            let mut status = sdk::DeviceStatus::unavailable();
+            status.available = true;
+            status.print_block = Some(fault);
+            app.apply_device_status(Ok(status));
+            assert!(!app.can_print());
+        }
+        app.apply_device_status(Ok(sdk::DeviceStatus::unavailable()));
+        assert!(app.can_print());
+        app.preview_print_issue = Some("Unreadable QR".into());
+        assert!(!app.can_print());
+    }
+
+    #[test]
     fn added_objects_require_dymo_preview_and_counters_are_planned() {
         let mut app = LabelApp { connected: Some(true), ..Default::default() };
         app.features.add(features::FeatureKind::Shape, 9).unwrap();
@@ -2841,7 +2972,7 @@ mod project_tests {
 }
 
 fn main() -> eframe::Result {
-    let (acknowledge, update_message, _instance) = match updater::startup() {
+    let (acknowledge, update_message, instance) = match updater::startup() {
         Ok(updater::Startup::Run { acknowledge, message, instance }) => (acknowledge, message, instance),
         Ok(updater::Startup::Exit) => return Ok(()),
         Err(error) => { updater::show_error(&error); return Ok(()); }
@@ -2866,6 +2997,7 @@ fn main() -> eframe::Result {
                 Err(error) => app.settings_message = error,
             }
             app.appearance.apply(&cc.egui_ctx);
+            app.app_window = Some(std::sync::Arc::new(instance));
             app.app_update_acknowledge = acknowledge;
             if let Some(message) = update_message { app.app_update_startup_message = Some(message.clone()); app.app_update_status = message; }
             let update_preferences_loaded = match app_updates::load_repository() {

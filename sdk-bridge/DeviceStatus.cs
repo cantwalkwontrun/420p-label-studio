@@ -4,11 +4,15 @@ using DYMO.LabelAPI.Windows.Printers;
 
 // The same read-only legacy status entry point used by the vendor's 420P
 // communication class. No arbitrary/raw commands or device settings are sent.
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<PrintBlock>))]
+internal enum PrintBlock { NoCassette, LowPower, PrinterError }
+
 internal sealed record DeviceStatusResult(bool Connected, bool StatusAvailable,
     int? BatteryPercent = null, bool? Charging = null, int? TapeWidthMm = null,
     string? Message = null)
 {
     public string[] Issues { get; init; } = [];
+    public PrintBlock? PrintBlock { get; init; }
 }
 
 internal static class DeviceStatus
@@ -19,6 +23,11 @@ internal static class DeviceStatus
     internal static DeviceStatusResult Read()
     {
         if (!PrintingSupportGateway.IsPrinterConnected(PrinterName)) return Disconnected();
+        return ReadConnected();
+    }
+
+    internal static DeviceStatusResult ReadConnected()
+    {
         try { return Decode(PrintingSupportGateway.GetTapePrinterStatus(PrinterName)); }
         catch (Exception) { return new(true, false, Message: "Printer details are unavailable. Try refreshing the connection."); }
     }
@@ -53,6 +62,11 @@ internal static class DeviceStatus
         int? width = !cassettePresent ? null : status.TapeWidth switch {
             ETapeWidth.tw6mm => 6, ETapeWidth.tw9mm => 9, ETapeWidth.tw12mm => 12, ETapeWidth.tw19mm => 19, _ => null
         };
-        return new(true, true, percentage, charging, width) { Issues = issues.ToArray() };
+        var block = status.PrintError switch {
+            PnpStatus.Enums.PrintError.NoPowerToPrint => PrintBlock.LowPower,
+            PnpStatus.Enums.PrintError.GeneralError => PrintBlock.PrinterError,
+            _ => cassettePresent ? (PrintBlock?)null : PrintBlock.NoCassette
+        };
+        return new(true, true, percentage, charging, width) { Issues = issues.ToArray(), PrintBlock = block };
     }
 }

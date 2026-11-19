@@ -3,6 +3,19 @@ use base64::Engine;
 use wait_timeout::ChildExt;
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum PrintBlock { NoCassette, LowPower, PrinterError }
+
+impl PrintBlock {
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::NoCassette => "Insert a D1 cassette before printing.",
+            Self::LowPower => "Charge the battery before printing.",
+            Self::PrinterError => "Check the printer display and tape exit before printing.",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct DeviceStatus {
     pub connected: bool,
     pub available: bool,
@@ -10,12 +23,13 @@ pub struct DeviceStatus {
     pub charging: Option<bool>,
     pub tape_width_mm: Option<u8>,
     pub issues: Vec<String>,
+    pub print_block: Option<PrintBlock>,
     pub message: Option<String>,
 }
 
 impl DeviceStatus {
     pub fn disconnected() -> Self {
-        Self { connected: false, available: false, battery_percent: None, charging: None, tape_width_mm: None, issues: Vec::new(), message: None }
+        Self { connected: false, available: false, battery_percent: None, charging: None, tape_width_mm: None, issues: Vec::new(), print_block: None, message: None }
     }
 
     pub fn unavailable() -> Self {
@@ -32,7 +46,13 @@ impl DeviceStatus {
         let tape_width_mm = value["tapeWidthMm"].as_u64().filter(|n| [6, 9, 12, 19].contains(n)).map(|n| n as u8);
         let issues = value["issues"].as_array().ok_or("Printer issues missing from status response.")?
             .iter().take(10).filter_map(|v| v.as_str()).map(|s| s.chars().take(500).collect()).collect();
-        Ok(Self { connected, available, battery_percent, charging: value["charging"].as_bool(), tape_width_mm, issues, message })
+        let print_block = match value["printBlock"].as_str() {
+            Some("NoCassette") => Some(PrintBlock::NoCassette),
+            Some("LowPower") => Some(PrintBlock::LowPower),
+            Some("PrinterError") => Some(PrintBlock::PrinterError),
+            _ => None,
+        };
+        Ok(Self { connected, available, battery_percent, charging: value["charging"].as_bool(), tape_width_mm, issues, print_block, message })
     }
 }
 
@@ -52,6 +72,7 @@ fn read_device_status(bridge: PathBuf, request: serde_json::Value) -> Result<Dev
 
 pub struct Preview {
     pub image: image::RgbaImage,
+    pub print_issue: Option<String>,
     pub design_image: Option<image::RgbaImage>,
     pub dimensions_mm: Option<(f64, f64)>,
     pub printable_dimensions_mm: Option<(f64, f64)>,
@@ -63,6 +84,18 @@ pub struct Preview {
     pub threshold_image_blank: bool,
     pub objects: Vec<serde_json::Value>,
     pub snapshot: std::sync::Arc<PrintSnapshot>,
+}
+
+pub fn image_has_ink(image: &image::RgbaImage) -> bool {
+    image.pixels().next().is_some_and(|paper| image.pixels().any(|pixel| pixel[3] != 0 && pixel != paper))
+}
+
+impl Preview {
+    pub fn check_printable(&self) -> Result<(), String> {
+        if let Some(issue) = &self.print_issue { return Err(issue.clone()); }
+        if !image_has_ink(&self.image) { return Err("The preview contains no printable ink.".into()); }
+        Ok(())
+    }
 }
 
 /// Immutable template, image and formatting inputs used by both preview and print.
@@ -201,7 +234,8 @@ fn preview_snapshot_with_bridge(bridge: PathBuf, snapshot: std::sync::Arc<PrintS
         .filter(|image| image.width() <= 4096 && image.height() <= 4096 && u64::from(image.width()) * u64::from(image.height()) <= 16_000_000);
     let empty_primary_text = result["emptyPrimaryText"].as_str().map(str::to_owned);
     let threshold_image_blank = snapshot.threshold_image_blank;
-    Ok(Preview { image: image::load_from_memory(&bytes).map_err(|e| e.to_string())?.to_rgba8(), design_image, dimensions_mm, printable_dimensions_mm, printable_origin_mm, adjusted_objects, object_layouts, all_layouts, empty_primary_text, threshold_image_blank, objects, snapshot })
+    let print_issue = result["printIssue"].as_str().map(str::to_owned);
+    Ok(Preview { print_issue, image: image::load_from_memory(&bytes).map_err(|e| e.to_string())?.to_rgba8(), design_image, dimensions_mm, printable_dimensions_mm, printable_origin_mm, adjusted_objects, object_layouts, all_layouts, empty_primary_text, threshold_image_blank, objects, snapshot })
 }
 
 pub fn print_snapshot(snapshot: &PrintSnapshot, text: String, copies: u16, objects: Vec<serde_json::Value>) -> Result<(), String> {
@@ -316,6 +350,7 @@ mod tests {
             assert!(status.connected && status.available);
             assert_eq!((status.battery_percent, status.charging, status.tape_width_mm), (Some(75), Some(true), Some(width)));
             assert!(status.issues.is_empty());
+            assert_eq!(status.print_block, None);
         }
         for percent in [0, 100] {
             let status = decode(&[0x40, 2, 0, percent, 0, 0, 0, 0]);
@@ -326,9 +361,11 @@ mod tests {
         for bytes in [vec![], vec![0; 7], vec![0; 9]] {
             let incomplete = decode(&bytes);
             assert!(incomplete.connected && !incomplete.available);
+            assert_eq!(incomplete.print_block, None);
             assert_eq!((incomplete.battery_percent, incomplete.charging, incomplete.tape_width_mm), (None, None, None));
         }
         let missing = decode(&[0, 2, 0, 75, 0, 0, 0, 0]);
+        assert_eq!(missing.print_block, Some(PrintBlock::NoCassette));
         assert_eq!(missing.tape_width_mm, None);
         assert!(missing.issues.iter().any(|s| s.contains("No cassette")));
         for (flags, message) in [(0x21, "Battery power error"), (0x22, "No battery"), (0x23, "USB charging current"), (0x20, "charging error")] {
@@ -338,12 +375,14 @@ mod tests {
             if flags == 0x22 { assert_eq!(status.battery_percent, None); }
         }
         let low = decode(&[0x40, 2, 0x80, 0, 0, 0, 0, 0]);
+        assert_eq!(low.print_block, Some(PrintBlock::LowPower));
         assert!(low.issues.iter().any(|s| s.contains("too low to print")));
         let missing_and_low = decode(&[0, 2, 0x80, 0, 0, 0, 0, 0]);
         assert_eq!(missing_and_low.tape_width_mm, None);
         assert!(missing_and_low.issues.iter().any(|s| s.contains("too low to print")));
         assert!(missing_and_low.issues.iter().any(|s| s.contains("No cassette")));
         let error = decode(&[0x44, 2, 0, 75, 0, 0, 0, 0]);
+        assert_eq!(error.print_block, Some(PrintBlock::PrinterError));
         assert!(error.issues.iter().any(|s| s.contains("Printer error")));
     }
 
@@ -493,6 +532,36 @@ mod tests {
     }
 
     #[test]
+    fn alignment_only_native_edit_preserves_mixed_text_runs() {
+        let (Ok(bridge), Ok(dir)) = (std::env::var("DYMO_TEST_BRIDGE"), std::env::var("DYMO_TEST_TEMPLATE_DIR")) else { return; };
+        let dir = PathBuf::from(dir);
+        let text = include_str!("../sdk-bridge/default-text.xml");
+        let start = text.find("<TextSpan>").unwrap();
+        let end = text.find("</TextSpan>").unwrap() + "</TextSpan>".len();
+        let first = text[start..end].replace("<Text />", "<Text>Alpha</Text>");
+        let second = first.replace("Alpha", "Bravo").replace("Segoe UI", "Arial").replace("<IsBold>False", "<IsBold>True").replace("<IsItalic>False", "<IsItalic>True").replace("<IsUnderline>False", "<IsUnderline>True");
+        let text = text.replace(&text[start..end], &(first + &second));
+        let template = std::fs::read_to_string(dir.join("9mm.dymo")).unwrap().replace("<LabelObjects />", &format!("<LabelObjects>{text}</LabelObjects>"));
+        let imported = crate::native_labels::NativeLabel::from_value(&serde_json::json!({
+            "xml":base64::engine::general_purpose::STANDARD.encode(template.as_bytes()), "width":9, "text":"AlphaBravo",
+            "bold":false, "italic":false, "underline":false, "font":"Segoe UI", "align":"Center"
+        })).unwrap();
+        let snapshot = make_snapshot_with_native("", "", false, 128, 9, false, false, false, "Segoe UI".into(), "Right".into(), None, Some(imported)).unwrap();
+        let bytes = export_snapshot_with_bridge(bridge.into(), &snapshot, "AlphaBravo".into(), vec![]).unwrap();
+        let xml = std::str::from_utf8(&bytes).unwrap();
+        let fonts: Vec<_> = xml.split("<FontInfo>").skip(1).map(|s| s.split("</FontInfo>").next().unwrap()).collect();
+        assert_eq!(fonts.len(), 2);
+        assert!(fonts[0].contains("<FontName>Segoe UI</FontName>"));
+        assert!(fonts[1].contains("<FontName>Arial</FontName>"));
+        for flag in ["IsBold", "IsItalic", "IsUnderline"] {
+            assert!(fonts[0].contains(&format!("<{flag}>False</{flag}>")));
+            assert!(fonts[1].contains(&format!("<{flag}>True</{flag}>")));
+        }
+        assert!(xml.contains("<HorizontalAlignment>Right</HorizontalAlignment>"));
+        assert!(!xml.contains("<HorizontalAlignment>Center</HorizontalAlignment>"));
+    }
+
+    #[test]
     fn imported_live_dates_and_embedded_counters_are_rejected_when_fixtures_supplied() {
         let (Ok(bridge), Ok(dir)) = (std::env::var("DYMO_TEST_BRIDGE"), std::env::var("DYMO_TEST_TEMPLATE_DIR")) else { return; };
         let template = PathBuf::from(dir).join("9mm.dymo").to_string_lossy().into_owned();
@@ -530,6 +599,8 @@ mod tests {
         let render = |cutoff| preview_with_bridge(PathBuf::from(&bridge), template.clone(), String::new(), path.to_string_lossy().into_owned(), true, cutoff, 9, false, false, false, "Segoe UI".into(), "Center".into(), vec![]).unwrap();
         let white = render(50);
         let black = render(200);
+        assert!(white.check_printable().is_err());
+        assert!(black.check_printable().is_ok());
         assert!(white.threshold_image_blank, "an all-white threshold must be reported to the user");
         assert!(!black.threshold_image_blank);
         assert_ne!(white.image, black.image, "changing threshold must change the SDK's actual printer-resolution output");

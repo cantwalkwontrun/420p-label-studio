@@ -2,7 +2,7 @@
 //!
 //! Staging and temporary recovery data stay in a new dedicated directory beside
 //! the target, so replacement is on the same volume. The caller remains
-//! responsible for warning about unsaved changes and concurrent edits.
+//! responsible for reporting save failures and keeping unsaved edits available.
 use std::{fs, io::{self, Read, Write}, path::{Path, PathBuf}, sync::atomic::{AtomicU64, Ordering}};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -27,23 +27,44 @@ pub fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
 }
 
 /// Write a new project, or replace an existing project when `overwrite` is true.
-/// A failed replacement retains the previous file or identifies its recovery
-/// copy in the returned error. This does not resolve concurrent external edits.
+/// Callers with an earlier read of the file should pass it to write_checked.
 pub fn write_project(path: &Path, bytes: &[u8], overwrite: bool) -> Result<(), String> {
-    write_checked(path, bytes, overwrite, |_| Ok(()))
+    let previous = if overwrite {
+        Some(read_bounded(path, PROJECT_LIMIT).map_err(|e| format!("Could not read the existing file: {e}"))?)
+    } else { None };
+    write_checked(path, bytes, previous.as_deref(), |_| Ok(()))
 }
 
-/// Validate the staged file before making any change to the final destination.
-pub fn write_checked(path: &Path, bytes: &[u8], overwrite: bool, validate: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
+/// Keep writers out while checking this file. Share deletion so ReplaceFileW
+/// can move it. A concurrent rename can still substitute a different file.
+fn matching_file(path: &Path, expected: &[u8]) -> io::Result<fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    const FILE_SHARE_READ: u32 = 1;
+    const FILE_SHARE_DELETE: u32 = 4;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let mut file = fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(path)?;
+    if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::other("The destination is a reparse point."));
+    }
+    let mut actual = Vec::new();
+    (&mut file).take(expected.len() as u64 + 1).read_to_end(&mut actual)?;
+    if actual != expected { return Err(io::Error::other("The file contents changed.")); }
+    Ok(file)
+}
+
+/// Check the staged file and replace only the revision the caller agreed to overwrite.
+pub fn write_checked(path: &Path, bytes: &[u8], previous: Option<&[u8]>, validate: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     if path.file_name().is_none() { return Err("Choose a project file name.".into()); }
-    if overwrite {
+    if previous.is_some() {
         let meta = fs::symlink_metadata(path).map_err(|e| format!("Could not inspect the existing project: {e}"))?;
         if !meta.file_type().is_file() { return Err("The existing project is not a regular file.".into()); }
     }
     let staging = create_staging_dir(parent)?;
     let replacement = staging.join("new").with_extension(path.extension().unwrap_or_default());
-    let backup = staging.join("previous.420p");
+    let backup = staging.join("previous").with_extension(path.extension().unwrap_or_default());
     let prepared = (|| -> Result<(), String> {
         let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&replacement)
             .map_err(|e| format!("Could not prepare the project: {e}"))?;
@@ -56,13 +77,16 @@ pub fn write_checked(path: &Path, bytes: &[u8], overwrite: bool, validate: impl 
         return Err(cleanup_error(error, &replacement, &staging));
     }
 
-    if !overwrite {
+    let Some(previous) = previous else {
         if let Err(error) = move_new(&replacement, path) {
             return Err(cleanup_error(format!("Could not create the project without overwriting an existing file: {error}"), &replacement, &staging));
         }
         return fs::remove_dir(&staging).map_err(|e| format!("Project saved, but the empty temporary folder could not be removed ({}): {e}", staging.display()));
-    }
+    };
 
+    let original_guard = matching_file(path, previous).map_err(|e| cleanup_error(
+        format!("The destination changed or could not be checked before saving: {e} Choose another file to preserve your edits."),
+        &replacement, &staging))?;
     if let Err(error) = replace_existing(path, &replacement, &backup) {
         // ReplaceFileW may move the old project to the backup even on failure.
         // Restore only if the original name is absent; never overwrite a file.
@@ -77,14 +101,21 @@ pub fn write_checked(path: &Path, bytes: &[u8], overwrite: bool, validate: impl 
         return Err(cleanup_error(format!("Could not save the project; the existing file was retained: {error}"), &replacement, &staging));
     }
 
-    match fs::read(path) {
-        Ok(saved) if saved == bytes => {}
-        Ok(_) => return Err(format!("The saved project did not match the requested contents. The previous version is retained at {}.", backup.display())),
-        Err(error) => return Err(format!("Could not verify the saved project: {error}. The previous version is retained at {}.", backup.display())),
-    }
-    fs::remove_file(&backup).map_err(|e| format!("The project was saved and verified, but its temporary previous copy could not be removed ({}): {e}", backup.display()))?;
+    // The path may have been replaced between opening it and ReplaceFileW.
+    // Check the actual file that was displaced before deleting any recovery data.
+    verify_replacement(path, bytes, &backup, previous)?;
+    drop(original_guard);
     fs::remove_dir(&staging).map_err(|e| format!("The project was saved and verified, but its empty temporary folder could not be removed ({}): {e}", staging.display()))?;
     Ok(())
+}
+
+fn verify_replacement(path: &Path, bytes: &[u8], backup: &Path, previous: &[u8]) -> Result<(), String> {
+    let _displaced_guard = matching_file(backup, previous).map_err(|e| format!(
+        "Concurrent save conflict: {e} The displaced file is kept at {}. The requested save went to {}. Check both files before retrying.",
+        backup.display(), path.display()))?;
+    let _saved_guard = matching_file(path, bytes).map_err(|e| format!(
+        "Could not verify the saved project: {e} The previous version is retained at {}.", backup.display()))?;
+    fs::remove_file(backup).map_err(|e| format!("The project was saved and verified, but its temporary previous copy could not be removed ({}): {e}", backup.display()))
 }
 
 pub(crate) fn create_staging_dir(parent: &Path) -> Result<PathBuf, String> {
@@ -166,8 +197,8 @@ mod tests {
         let existing = dir.join("old.dymo");
         let fresh = dir.join("new.dymo");
         fs::write(&existing, b"original").unwrap();
-        for (path, overwrite) in [(&fresh, false), (&existing, true)] {
-            let error = write_checked(path, b"candidate", overwrite, |staged| {
+        for (path, previous) in [(&fresh, None), (&existing, Some(b"original".as_slice()))] {
+            let error = write_checked(path, b"candidate", previous, |staged| {
                 assert_eq!(staged.extension(), path.extension());
                 assert_eq!(fs::read(staged).unwrap(), b"candidate");
                 Err("unusable label".into())
@@ -180,6 +211,43 @@ mod tests {
         write_project(&fresh, b"usable", false).unwrap();
         fs::remove_file(fresh).unwrap();
         fs::remove_file(existing).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn a_revision_changed_during_staging_is_kept_in_place() {
+        let dir = fixture();
+        let path = dir.join("draft.420p");
+        fs::write(&path, b"previous").unwrap();
+        let result = write_checked(&path, b"Studio edit", Some(b"previous"), |_| {
+            fs::write(&path, b"concurrent revision").unwrap(); Ok(())
+        });
+        assert!(result.unwrap_err().contains("changed"));
+        assert_eq!(fs::read(&path).unwrap(), b"concurrent revision");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn raced_rename_retains_both_revisions_when_the_displaced_file_differs() {
+        let dir = fixture();
+        let path = dir.join("label.dymo");
+        let previous = dir.join("previous.dymo");
+        let candidate = dir.join("new.dymo");
+        let original = dir.join("original.dymo");
+        fs::write(&path, b"baseline").unwrap();
+        let guard = matching_file(&path, b"baseline").unwrap();
+        fs::rename(&path, &original).unwrap();
+        fs::write(&path, b"external revision").unwrap();
+        fs::write(&candidate, b"studio revision").unwrap();
+        replace_existing(&path, &candidate, &previous).unwrap();
+        let error = verify_replacement(&path, b"studio revision", &previous, b"baseline").unwrap_err();
+        assert!(error.contains("Concurrent save conflict"));
+        assert_eq!(fs::read(&path).unwrap(), b"studio revision");
+        assert_eq!(fs::read(&previous).unwrap(), b"external revision");
+        drop(guard);
+        for file in [path, previous, original] { fs::remove_file(file).unwrap(); }
         fs::remove_dir(dir).unwrap();
     }
 

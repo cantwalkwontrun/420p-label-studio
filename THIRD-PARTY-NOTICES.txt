@@ -9,6 +9,10 @@ https://github.com/ankitmlive/firefly-theme/blob/master/License.txt and a
 copy of Apache License 2.0 is included in the binary distribution under
 licences/nuget/AWSSDK.Core-3.7.400/LICENSE-APACHE.txt.
 
+The printer-resolution QR check uses ZXing.Net 0.16.11, by Michael Jahn
+and the ZXing contributors, under the Apache License 2.0. Its licence
+is included at licences/nuget/ZXing.Net-0.16.11/COPYING.
+
 This source project references the DYMO Connect SDK, DYMO LabelAPI Windows,
 DYMO CrossPlatform Common Windows (1.6.0) and DYMO NativeAssets (1.6.0.1).
 Blank XML label/object templates use DYMO's SDK format. The direct DYMO

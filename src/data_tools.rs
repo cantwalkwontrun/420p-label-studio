@@ -167,7 +167,7 @@ impl ContactBook {
             let current = read_bounded(&self.path)?;
             if &current != previous { return Err("The contact file changed outside this app. Open it again before saving.".into()); }
         }
-        crate::project_io::write_project(&self.path, &bytes, self.snapshot.is_some())?;
+        crate::project_io::write_checked(&self.path, &bytes, self.snapshot.as_deref(), |_| Ok(()))?;
         self.snapshot = Some(bytes); self.dirty = false; Ok(())
     }
 }

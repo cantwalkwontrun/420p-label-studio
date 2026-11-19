@@ -30,7 +30,7 @@ impl Request {
 enum DestinationMode { #[default] BesideOriginals, ExistingFolder, NewFolder }
 pub enum Event { Progress { processed: usize, total: usize }, Finished(Summary) }
 #[derive(Default)]
-pub struct Summary { pub converted: usize, pub skipped: usize, pub processed: usize, pub total: usize, pub recycled: usize, pub folders_removed: usize, pub cancelled: bool, pub details: Vec<String>, pub output_folders: Vec<PathBuf> }
+pub struct Summary { pub converted: usize, pub skipped: usize, pub processed: usize, pub total: usize, pub recycled: usize, pub folders_removed: usize, pub cancelled: bool, pub details: Vec<String>, pub output_folders: Vec<PathBuf>, created_folder: Option<PathBuf> }
 impl Summary {
     pub fn message(&self) -> String {
         if self.total == 0 { return format!("{} {}", if self.cancelled { "Stopped." } else { "No labels converted." }, self.details.first().map(String::as_str).unwrap_or("No matching labels found.")); }
@@ -60,9 +60,22 @@ impl Default for Converter {
     fn default() -> Self { Self { open: false, direction: Direction::ToProject, source: None, output: None, destination_mode: DestinationMode::BesideOriginals, new_folder_name: "Converted labels".into(), recursive: false, preserve_folders: true, recycle_originals: false, remove_empty_folders: false, open_when_finished: false, output_folders: Vec::new(), cancel: None, status: String::new(), details: Vec::new() } }
 }
 impl Converter {
+    fn destination(&self) -> Option<Destination> {
+        match self.destination_mode {
+            DestinationMode::BesideOriginals => Some(Destination::BesideOriginals),
+            DestinationMode::ExistingFolder => self.output.clone().map(Destination::Folder),
+            DestinationMode::NewFolder => self.output.clone().or_else(|| self.source.as_ref().and_then(source_location))
+                .map(|parent| Destination::NewFolder { parent, name: self.new_folder_name.clone() }),
+        }
+    }
     pub fn finish(&mut self, summary: Summary) { self.finish_with(summary, open_output_folder); }
     fn finish_with(&mut self, summary: Summary, mut open: impl FnMut(&Path) -> Result<(), String>) {
         self.status = summary.message(); self.cancel = None;
+        if (summary.skipped > 0 || summary.cancelled) && let Some(folder) = summary.created_folder {
+            self.destination_mode = DestinationMode::ExistingFolder;
+            self.output = Some(folder);
+            self.status.push_str(" The folder created for this run is selected for retry.");
+        }
         let auto_open = self.open_when_finished && summary.converted > 0 && !summary.cancelled;
         self.details = summary.details; self.output_folders = summary.output_folders;
         if auto_open && self.output_folders.len() == 1 {
@@ -123,11 +136,7 @@ impl Converter {
                 ui.checkbox(&mut self.open_when_finished, "Open output folder when finished");
                 ui.weak("Existing destination files are skipped. Failed, changed or unconverted originals are kept. Folder scans skip symbolic links and junctions.");
                 if self.direction == Direction::ToDymo { ui.weak("DYMO labels retain the print design. Studio guides and editing settings remain in the .420p originals."); }
-                let destination = match self.destination_mode {
-                    DestinationMode::BesideOriginals => Some(Destination::BesideOriginals),
-                    DestinationMode::ExistingFolder => self.output.clone().map(Destination::Folder),
-                    DestinationMode::NewFolder => self.output.clone().or_else(|| self.source.as_ref().and_then(source_location)).map(|parent| Destination::NewFolder { parent, name: self.new_folder_name.clone() }),
-                };
+                let destination = self.destination();
                 let ready = self.source.is_some() && destination.is_some();
                 if ui.add_enabled(ready, egui::Button::new(if self.recycle_originals { "Convert and recycle verified originals" } else { "Convert labels" })).clicked() {
                     request = Some(Request { source: self.source.clone().unwrap(), destination: destination.unwrap(), direction: self.direction, recursive: self.recursive, preserve_folders: self.preserve_folders, recycle_originals: self.recycle_originals, remove_empty_folders: self.remove_empty_folders });
@@ -294,6 +303,7 @@ fn run_with_cleanup(request: Request, cancel: &AtomicBool, mut notify: impl FnMu
     if cancel.load(Ordering::Acquire) { summary.cancelled = true; notify(Event::Finished(summary)); return; }
     if plan.new_output && summary.total > 0 {
         if let Err(error) = fs::create_dir(plan.output.as_ref().unwrap()) { summary.detail(format!("Cannot create the new destination folder: {error}")); summary.total = 0; notify(Event::Finished(summary)); return; }
+        summary.created_folder = plan.output.clone();
     }
     notify(Event::Progress { processed: 0, total: summary.total });
     let mut emptied_candidates = std::collections::BTreeSet::new();
@@ -398,6 +408,28 @@ mod tests {
         let mut summary = None;
         run(request, &AtomicBool::new(false), |event| if let Event::Finished(value) = event { summary = Some(value); }, |source, target, _| crate::project_io::write_project(target, &fs::read(source).unwrap(), false));
         summary.unwrap()
+    }
+    #[test]
+    fn retry_uses_the_folder_created_by_the_failed_batch() {
+        let root = temporary();
+        let label = root.join("source.dymo");
+        fs::write(&label, b"synthetic").unwrap();
+        let mut converter = Converter { source: Some(Source::Files(vec![label.clone()])), destination_mode: DestinationMode::NewFolder, ..Default::default() };
+        let mut request = Request::folder(root.clone(), root.clone(), Direction::ToProject, false);
+        request.source = converter.source.clone().unwrap();
+        request.destination = converter.destination().unwrap();
+        run(request.clone(), &AtomicBool::new(false), |event| {
+            if let Event::Finished(summary) = event { assert_eq!(summary.skipped, 1); converter.finish(summary); }
+        }, |_, _, _| Err("Temporary conversion failure".into()));
+        let output = root.join("Converted labels");
+        assert_eq!(converter.output.as_deref(), Some(output.as_path()));
+        fs::write(output.join("keep"), b"unrelated").unwrap();
+        request.destination = converter.destination().unwrap();
+        assert_eq!(copy_run(request).converted, 1);
+        assert_eq!(fs::read(output.join("source.420p")).unwrap(), b"synthetic");
+        assert_eq!(fs::read(output.join("keep")).unwrap(), b"unrelated");
+        assert_eq!(fs::read(label).unwrap(), b"synthetic");
+        cleanup(root);
     }
     #[test]
     fn folder_opening_is_optional_and_requires_completed_output() {

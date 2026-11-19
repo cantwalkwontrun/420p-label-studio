@@ -14,7 +14,23 @@ struct Journal { source_version: String, records: Vec<Previous> }
 
 pub struct InstanceGuard { _handle: native::Instance }
 pub fn download_guard(install: &Path) -> Result<InstanceGuard, String> { Ok(InstanceGuard { _handle: native::named_guard(install, "download", true)? }) }
-pub enum Startup { Run { acknowledge: Option<String>, message: Option<String>, instance: InstanceGuard }, Exit }
+pub struct WindowRegistration(std::sync::Mutex<Option<native::Instance>>);
+impl WindowRegistration {
+    fn open(install: &Path) -> Result<Self, String> {
+        Ok(Self(std::sync::Mutex::new(Some(native::instance(install, false)?))))
+    }
+    // The admission lock serialises this handoff against new editor windows.
+    // Reusing the lifetime guard also detects tray windows and older clients.
+    fn reserve_restart(&self, install: &Path, _admission: &native::Admission) -> Result<(), String> {
+        let mut slot = self.0.lock().map_err(|_| "Cannot check the current app window.")?;
+        drop(slot.take());
+        match native::instance(install, true) {
+            Ok(only) => { *slot = Some(only); Ok(()) }
+            Err(error) => { *slot = Some(native::instance(install, false)?); Err(error) }
+        }
+    }
+}
+pub enum Startup { Run { acknowledge: Option<String>, message: Option<String>, instance: WindowRegistration }, Exit }
 
 pub(crate) fn version(value: &str) -> Result<[u32; 4], String> {
     let parts: Vec<_> = value.split('.').collect();
@@ -176,7 +192,7 @@ fn clear_empty_intent(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn start(prepared: &Prepared) -> Result<(), String> {
+pub fn start(prepared: &Prepared, window: &WindowRegistration) -> Result<(), String> {
     if version(&prepared.version)? <= version(env!("CARGO_PKG_VERSION"))? { return Err("Only a newer app version can be installed.".into()); }
     let install = package::install_directory()?;
     let _download_guard = download_guard(&install)?;
@@ -189,6 +205,8 @@ pub fn start(prepared: &Prepared) -> Result<(), String> {
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
     let plan = Plan { prepared: prepared.clone(), source_version: env!("CARGO_PKG_VERSION").into(), source_hash: package::hash_file(&current)?,
         parent: native::current()?, nonce: nonce(), helper_hash: package::hash_file(&current)?, recovery: false };
+    let admission = native::admission(&install)?;
+    window.reserve_restart(&install, &admission)?;
     launch_helper(&root, plan)
 }
 
@@ -204,7 +222,9 @@ fn launch_helper(root: &Path, plan: Plan) -> Result<(), String> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(12) {
         if fs::read_to_string(root.join("helper.ready")).ok().as_deref() == Some(plan.nonce.as_str()) { return Ok(()); }
-        if child.try_wait().map_err(|e| e.to_string())?.is_some() { return Err("The restart helper could not prepare the update. The current app has been kept open.".into()); }
+        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+            return Err(failed_attempt(root, &plan).unwrap_or_else(|| "The restart helper could not prepare the update. The current app has been kept open.".into()));
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     let _ = child.kill(); let _ = child.wait();
@@ -212,10 +232,31 @@ fn launch_helper(root: &Path, plan: Plan) -> Result<(), String> {
 }
 
 pub fn startup() -> Result<Startup, String> {
-    startup_with_recovery(launch_helper)
+    startup_with_recovery(launch_helper, native::ask_recovery)
 }
 
-fn startup_with_recovery(launch_recovery: impl FnOnce(&Path, Plan) -> Result<(), String>) -> Result<Startup, String> {
+fn failed_attempt(root: &Path, plan: &Plan) -> Option<String> {
+    let result = read_json(&root.join("result.json")).ok()?;
+    let message = result["message"].as_str()?;
+    let matches = result["failedAttempt"].as_str() == Some(plan.nonce.as_str());
+    // Older helpers wrote only text. Their recorded recovery failure is
+    // relevant while the legacy recovery plan and journal are still pending.
+    let legacy = result["failedAttempt"].is_null() && message.starts_with("The update could not finish:") && (plan.recovery || {
+        let modified = |name| fs::metadata(root.join(name)).and_then(|m| m.modified()).ok();
+        message.contains("Rollback needs attention.") &&
+            modified("result.json").zip(modified("plan.json")).is_some_and(|(result, plan)| result >= plan)
+    });
+    (matches || legacy).then(|| message.chars().take(2000).collect())
+}
+
+fn record_failure(root: &Path, plan: &Plan, error: &str) {
+    let _ = write_json(&root.join("result.json"), &serde_json::json!({
+        "schema": SCHEMA, "failedAttempt": plan.nonce, "message": format!("The update could not finish: {error}")
+    }));
+}
+
+fn startup_with_recovery(launch_recovery: impl FnOnce(&Path, Plan) -> Result<(), String>,
+        ask_recovery: impl Fn(&Path, &str) -> Result<bool, String>) -> Result<Startup, String> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().and_then(|s| s.to_str()) == Some("--apply-update") {
         if args.len() != 2 { return Err("Invalid restart helper arguments.".into()); }
@@ -225,69 +266,89 @@ fn startup_with_recovery(launch_recovery: impl FnOnce(&Path, Plan) -> Result<(),
             || package::workspace(root.parent().ok_or("Invalid installation folder.")?)? != root
             || std::env::current_exe().map_err(|e| e.to_string())?.canonicalize().map_err(|e| e.to_string())? != root.join("updater.exe") { return Err("The update helper was launched from an unexpected location.".into()); }
         let result = apply(root);
-        if let Err(error) = result { write_result(root, &format!("The update could not finish: {error}. Recovery files were retained locally.")); }
+        if let Err(error) = result {
+            if let Ok(plan) = Plan::read(root) {
+                if failed_attempt(root, &plan).is_none() { record_failure(root, &plan, &error); }
+            }
+        }
         return Ok(Startup::Exit);
     }
     let install = package::install_directory()?;
     let root_path = install.join(".420p-updater");
-    let instance = InstanceGuard { _handle: native::instance(&install, false)? };
     let acknowledge = if args.first().and_then(|s| s.to_str()) == Some("--update-ready") {
         if args.len() != 2 { return Err("Invalid update restart arguments.".into()); }
         let value = args[1].to_str().filter(|s| valid_nonce(s)).ok_or("Invalid update acknowledgement.")?.to_owned();
         Some(value)
     } else { None };
-    if !root_path.exists() {
-        if acknowledge.is_some() { return Err("The update restart metadata is missing.".into()); }
-        return Ok(Startup::Run { acknowledge: None, message: None, instance });
-    }
-    let root = match package::workspace(&install) {
-        Ok(root) => root,
-        Err(error) if acknowledge.is_none()
-            && !root_path.join("pending-backup").try_exists().unwrap_or(true)
-            && !root_path.join("install.lock.json").try_exists().unwrap_or(true) => {
-                // An unrelated or incomplete updater folder can disable
-                // updates without preventing the ordinary editor from opening.
-                return Ok(Startup::Run { acknowledge: None, message: Some(format!("App updates are unavailable: {error}")), instance });
+    let run = |acknowledge, message| Ok(Startup::Run { acknowledge, message, instance: WindowRegistration::open(&install)? });
+    let mut retry_nonce = None;
+    loop {
+        let admission = native::admission(&install)?;
+        if !root_path.exists() {
+            if acknowledge.is_some() { return Err("The update restart metadata is missing.".into()); }
+            return run(None, None);
+        }
+        let root = match package::workspace(&install) {
+            Ok(root) => root,
+            Err(error) if acknowledge.is_none()
+                && !root_path.join("pending-backup").try_exists().unwrap_or(true)
+                && !root_path.join("install.lock.json").try_exists().unwrap_or(true) => {
+                    // An unrelated or incomplete updater folder can disable
+                    // updates without preventing the ordinary editor from opening.
+                    return run(None, Some(format!("App updates are unavailable: {error}")));
+                }
+            Err(error) => return Err(error),
+        };
+        if let Some(ref token) = acknowledge {
+            let plan = Plan::read(&root)?;
+            if plan.nonce != *token || version(&plan.prepared.version)? != version(env!("CARGO_PKG_VERSION"))? || !check_lock(&root)? { return Err("The update restart could not be verified.".into()); }
+            package::verify_files(&install, &plan.prepared.files)?;
+            return run(Some(token.clone()), Some(format!("Installed version {}. Finishing the restart check…", env!("CARGO_PKG_VERSION"))));
+        }
+        if check_lock(&root)? { return Err("An app update is in progress. Wait for it to finish before opening another window.".into()); }
+        if root.join("pending-backup").exists() {
+            // Serialise recovery decisions with launches from a second shortcut
+            // and with ordinary update requests until the helper is ready.
+            let _guard = download_guard(&install)?;
+            if check_lock(&root)? { return Err("An app update is in progress. Wait for it to finish.".into()); }
+            clear_empty_intent(&root)?;
+            if !root.join("pending-backup").exists() {
+                return run(None, None);
             }
-        Err(error) => return Err(error),
-    };
-    if let Some(token) = acknowledge {
-        let plan = Plan::read(&root)?;
-        if plan.nonce != token || version(&plan.prepared.version)? != version(env!("CARGO_PKG_VERSION"))? || !check_lock(&root)? { return Err("The update restart could not be verified.".into()); }
-        package::verify_files(&install, &plan.prepared.files)?;
-        return Ok(Startup::Run { acknowledge: Some(token), message: Some(format!("Installed version {}. Finishing the restart check…", env!("CARGO_PKG_VERSION"))), instance });
-    }
-    if check_lock(&root)? { return Err("An app update is in progress. Wait for it to finish before opening another window.".into()); }
-    if root.join("pending-backup").exists() {
-        // Serialise recovery decisions with launches from a second shortcut
-        // and with ordinary update requests until the helper is ready.
-        let _guard = download_guard(&install)?;
-        if check_lock(&root)? { return Err("An app update is in progress. Wait for it to finish.".into()); }
-        clear_empty_intent(&root)?;
-        if !root.join("pending-backup").exists() {
-            return Ok(Startup::Run { acknowledge: None, message: None, instance });
+            let previous = Plan::read(&root)?;
+            if fs::read_to_string(root.join("installed.ready")).ok().as_deref() == Some(previous.nonce.as_str())
+                && version(&previous.prepared.version)? == version(env!("CARGO_PKG_VERSION"))? {
+                package::verify_files(&install, &previous.prepared.files)?;
+                let message = match finalise(&root) {
+                    Ok(()) => format!("Updated to version {}. The previous version is kept locally for recovery.", env!("CARGO_PKG_VERSION")),
+                    Err(_) => "The update is installed. Rotation of the local rollback is still pending; both recovery sets have been retained.".into(),
+                };
+                return run(None, Some(message));
+            }
+            // A previous helper stopped mid-transaction. Recovery runs outside the
+            // installed executable, after this process has released its file locks.
+            let pending = root.join("pending-backup");
+            Journal::read(&pending)?;
+            let mut plan = previous;
+            if retry_nonce.as_ref() != Some(&plan.nonce) {
+                let problem = failed_attempt(&root, &plan).or_else(|| plan.recovery.then(|| "The previous recovery attempt was interrupted.".into()));
+                if let Some(problem) = problem {
+                    drop(_guard);
+                    drop(admission);
+                    if !ask_recovery(&pending, &problem)? { return Ok(Startup::Exit); }
+                    retry_nonce = Some(plan.nonce);
+                    continue;
+                }
+            }
+            let _only_launcher = native::instance(&install, true)?;
+            plan.parent = native::current()?; plan.nonce = nonce(); plan.recovery = true;
+            plan.helper_hash = package::hash_file(&std::env::current_exe().map_err(|e| e.to_string())?)?;
+            launch_recovery(&root, plan)?;
+            return Ok(Startup::Exit);
         }
-        let previous = Plan::read(&root)?;
-        if fs::read_to_string(root.join("installed.ready")).ok().as_deref() == Some(previous.nonce.as_str())
-            && version(&previous.prepared.version)? == version(env!("CARGO_PKG_VERSION"))? {
-            package::verify_files(&install, &previous.prepared.files)?;
-            let message = match finalise(&root) {
-                Ok(()) => format!("Updated to version {}. The previous version is kept locally for recovery.", env!("CARGO_PKG_VERSION")),
-                Err(_) => "The update is installed. Rotation of the local rollback is still pending; both recovery sets have been retained.".into(),
-            };
-            return Ok(Startup::Run { acknowledge: None, message: Some(message), instance });
-        }
-        // A previous helper stopped mid-transaction. Recovery runs outside the
-        // installed executable, after this process has released its file locks.
-        Journal::read(&root.join("pending-backup"))?;
-        let mut plan = Plan::read(&root)?;
-        plan.parent = native::current()?; plan.nonce = nonce(); plan.recovery = true;
-        plan.helper_hash = package::hash_file(&std::env::current_exe().map_err(|e| e.to_string())?)?;
-        launch_recovery(&root, plan)?;
-        return Ok(Startup::Exit);
+        let message = if root.join("result.json").exists() { read_json(&root.join("result.json")).ok().and_then(|value| value["message"].as_str().map(|s| s.chars().take(1500).collect())) } else { None };
+        return run(None, message);
     }
-    let message = if root.join("result.json").exists() { read_json(&root.join("result.json")).ok().and_then(|value| value["message"].as_str().map(|s| s.chars().take(1500).collect())) } else { None };
-    Ok(Startup::Run { acknowledge: None, message, instance })
 }
 
 pub fn acknowledge(token: &str) -> Result<(), String> {
@@ -306,7 +367,7 @@ fn apply(root: &Path) -> Result<(), String> {
     let lock_path = root.join("install.lock.json");
     claim_install(root)?;
     let mut parent_closed = false;
-    let operation = (|| {
+    let operation: Result<bool, String> = (|| {
         if !plan.recovery {
             if version(&plan.prepared.version)? <= version(&plan.source_version)? { return Err("An update cannot downgrade or reinstall this version.".into()); }
             if package::hash_file(&plan.prepared.install.join(APP_EXE))? != plan.source_hash { return Err("The installed executable changed before restart.".into()); }
@@ -366,6 +427,7 @@ fn apply(root: &Path) -> Result<(), String> {
         let _ = package::remove_owned(root, "staging");
         Ok(true)
     })();
+    if let Err(error) = &operation { record_failure(root, &plan, error); }
     let _ = metadata_guard(root).and_then(|_guard| remove_file(&lock_path));
     match operation {
         Ok(true) => Ok(()),
@@ -451,37 +513,40 @@ fn finalise(root: &Path) -> Result<(), String> {
 fn restore_pending(root: &Path, install: &Path) -> Result<(), String> {
     let backup = root.join("pending-backup");
     let journal = Journal::read(&backup)?;
-    let mut errors = Vec::new();
-    for record in journal.records.iter().rev() {
-        let restore = (|| -> Result<(), String> {
-            let target = package::checked_target(install, &record.file.path, true)?;
-            let saved = package::checked_target(&backup, &record.file.path, true)?;
-            if let Some((bytes, hash)) = &record.old {
-                if target.exists() && fs::metadata(&target).map_err(|e| e.to_string())?.len() == *bytes && package::hash_file(&target)? == *hash { return Ok(()); }
-            }
-            if saved.exists() {
-                package::plain_file(&saved)?;
-                let (bytes, hash) = record.old.as_ref().ok_or("Unexpected recovery file.")?;
-                if fs::metadata(&saved).map_err(|e| e.to_string())?.len() != *bytes || package::hash_file(&saved)? != *hash { return Err("An original recovery file was changed.".into()); }
-                if target.exists() {
-                    if package::hash_file(&target)? != record.file.sha256 { return Err("A destination changed after installation; it was preserved for manual recovery.".into()); }
-                    native::move_file(&saved, &target, true)?;
-                } else {
-                    native::move_file(&saved, &target, false)?;
-                }
-            } else if record.old.is_some() {
-                return Err("An original app file needs manual recovery.".into());
-            } else if target.exists() {
-                if package::hash_file(&target)? != record.file.sha256 { return Err("A newly installed file was changed; it was preserved for manual recovery.".into()); }
-                fs::remove_file(target).map_err(|e| e.to_string())?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = restore { errors.push(error); }
+    // Look for conflicts before consuming any backup. Restore the launch
+    // executable last, so a failed DLL restore can still show recovery choices.
+    for apply in [false, true] {
+        let reversed = journal.records.iter().rev();
+        for record in reversed.clone().filter(|r| !r.file.path.eq_ignore_ascii_case(APP_EXE))
+                .chain(reversed.filter(|r| r.file.path.eq_ignore_ascii_case(APP_EXE))) {
+            restore_record(install, &backup, record, apply).map_err(|error|
+                format!("Rollback needs attention. Recovery files remain in {}. {}: {error}", backup.display(), record.file.path))?;
+        }
     }
-    if !errors.is_empty() { return Err(format!("Rollback needs attention. Recovery files remain in {}. {}", backup.display(), errors[0])); }
     package::remove_owned(root, "pending-backup")?;
     let _ = package::remove_owned(root, "staging");
+    Ok(())
+}
+
+fn restore_record(install: &Path, backup: &Path, record: &Previous, apply: bool) -> Result<(), String> {
+    let target = package::checked_target(install, &record.file.path, true)?;
+    let saved = package::checked_target(backup, &record.file.path, true)?;
+    if let Some((bytes, hash)) = &record.old {
+        if target.exists() && fs::metadata(&target).map_err(|e| e.to_string())?.len() == *bytes && package::hash_file(&target)? == *hash { return Ok(()); }
+    }
+    if saved.exists() {
+        package::plain_file(&saved)?;
+        let (bytes, hash) = record.old.as_ref().ok_or("Unexpected recovery file.")?;
+        if fs::metadata(&saved).map_err(|e| e.to_string())?.len() != *bytes || package::hash_file(&saved)? != *hash { return Err("An original recovery file was changed.".into()); }
+        let replace = target.try_exists().map_err(|e| e.to_string())?;
+        if replace && package::hash_file(&target)? != record.file.sha256 { return Err("The installed file was changed. Move your edited copy out of the installation folder before retrying.".into()); }
+        if apply { native::move_file(&saved, &target, replace)?; }
+    } else if record.old.is_some() {
+        return Err("An original app file needs manual recovery.".into());
+    } else if target.exists() {
+        if package::hash_file(&target)? != record.file.sha256 { return Err("The newly installed file was changed. Move your edited copy out of the installation folder before retrying.".into()); }
+        if apply { fs::remove_file(target).map_err(|e| e.to_string())?; }
+    }
     Ok(())
 }
 
@@ -575,11 +640,18 @@ mod tests {
         if let Ok(phase) = std::env::var(PROBE) {
             assert_eq!(std::env::current_exe().unwrap().file_name().unwrap(), APP_EXE);
             let mut called = false;
+            let asked = std::cell::Cell::new(false);
             let outcome = startup_with_recovery(|_, plan| {
                 assert!(plan.recovery); called = true; Ok(())
+            }, |folder, message| {
+                assert!(!asked.replace(true));
+                assert_eq!(folder.file_name().unwrap(), "pending-backup");
+                assert!(message.contains("sdk/component.dll") || message.contains("interrupted"));
+                Ok(phase == "retry")
             }).unwrap();
-            assert_eq!(called, phase == "recovery");
-            assert_eq!(matches!(outcome, Startup::Exit), called);
+            assert_eq!(asked.get(), matches!(phase.as_str(), "defer" | "retry"));
+            assert_eq!(called, matches!(phase.as_str(), "recovery" | "retry"));
+            assert_eq!(matches!(outcome, Startup::Exit), called || asked.get());
             if phase == "unowned" {
                 assert!(matches!(outcome, Startup::Run { message: Some(text), .. } if text.contains("updates are unavailable")));
             }
@@ -620,6 +692,24 @@ mod tests {
             assert!(install_files(&root, &prepared).is_err()); drop(lock);
             assert_eq!(package::hash_file(&launcher).unwrap(), if locked_file == APP_EXE { &old } else { &next }.as_str());
             probe("recovery");
+            let component = install.join("sdk/component.dll");
+            let prior_component = fs::read(&component).unwrap();
+            fs::write(&component, b"Independent SDK edit").unwrap();
+            let conflict = restore_pending(&root, &install).unwrap_err();
+            assert!(conflict.contains("sdk/component.dll"));
+            record_failure(&root, &plan, &conflict);
+            probe("defer"); probe("defer"); probe("retry");
+            assert_eq!(fs::read(&component).unwrap(), b"Independent SDK edit");
+            fs::write(&component, prior_component).unwrap();
+            assert_eq!(Plan::read(&root).unwrap().nonce, plan.nonce);
+            plan.nonce = nonce();
+            write_json(&root.join("plan.json"), &plan.value()).unwrap();
+            probe("recovery"); // A result from another transaction is ignored.
+            plan.recovery = true;
+            write_json(&root.join("plan.json"), &plan.value()).unwrap();
+            probe("defer"); // A recovery helper interrupted before recording its result.
+            write_result(&root, "The update could not finish: Conflicting sdk/component.dll");
+            probe("defer"); // Pre-upgrade recovery results contained only a message.
             restore_pending(&root, &install).unwrap();
             assert_eq!(package::hash_file(&launcher).unwrap(), old);
             probe("run");
@@ -655,10 +745,16 @@ mod tests {
     }
     #[test] fn other_app_windows_block_installation_until_their_guard_is_released() {
         let (install, _, _) = fixture();
-        let first = native::instance(&install, false).unwrap(); let second = native::instance(&install, false).unwrap();
-        assert!(native::instance(&install, true).is_err()); drop(first);
-        assert!(native::instance(&install, true).is_err()); drop(second);
-        let exclusive = native::instance(&install, true).unwrap(); drop(exclusive); cleanup(install);
+        let first = WindowRegistration::open(&install).unwrap();
+        let second = native::instance(&install, false).unwrap(); // also used by the previous release
+        let gate = native::admission(&install).unwrap();
+        assert!(first.reserve_restart(&install, &gate).unwrap_err().contains("tray"));
+        drop(second);
+        assert!(native::instance(&install, true).is_err()); // the original window kept its registration
+        first.reserve_restart(&install, &gate).unwrap();
+        assert!(native::instance(&install, true).is_err());
+        drop(first); drop(gate);
+        assert!(native::instance(&install, true).is_ok()); cleanup(install);
     }
     #[test] fn concurrent_downloads_are_serialised_separately_from_editor_windows() {
         let (install, _, _) = fixture(); let editor = native::instance(&install, false).unwrap();
@@ -702,7 +798,7 @@ mod tests {
 
 mod native {
     use super::*;
-    use std::{ffi::c_void, os::windows::ffi::OsStrExt};
+    use std::{ffi::c_void, os::windows::{ffi::OsStrExt, io::{AsRawHandle, FromRawHandle, OwnedHandle}}};
     type Handle = *mut c_void;
     #[repr(C)] #[derive(Default)] struct FileTime { low: u32, high: u32 }
     #[link(name="kernel32")]
@@ -713,6 +809,7 @@ mod native {
         fn WaitForSingleObject(handle: Handle, timeout: u32) -> u32;
         fn CloseHandle(handle: Handle) -> i32;
         fn CreateMutexW(attributes: *const c_void, owner: i32, name: *const u16) -> Handle;
+        fn ReleaseMutex(mutex: Handle) -> i32;
         fn MoveFileExW(existing: *const u16, target: *const u16, flags: u32) -> i32;
         fn GetLastError() -> u32;
     }
@@ -738,8 +835,19 @@ mod native {
     }
     pub(super) struct Watch(Handle);
     impl Drop for Watch { fn drop(&mut self) { unsafe { CloseHandle(self.0); } } }
-    pub(super) struct Instance(Handle);
-    impl Drop for Instance { fn drop(&mut self) { unsafe { CloseHandle(self.0); } } }
+    pub(super) struct Instance(OwnedHandle);
+    pub(super) struct Admission(Instance, std::marker::PhantomData<std::rc::Rc<()>>);
+    impl Drop for Admission {
+        fn drop(&mut self) { unsafe { ReleaseMutex(self.0.0.as_raw_handle()); } }
+    }
+    pub(super) fn admission(install: &Path) -> Result<Admission, String> {
+        let guard = named_guard(install, "admission", false)?;
+        match unsafe { WaitForSingleObject(guard.0.as_raw_handle(), 20_000) } {
+            0 | 0x80 => Ok(Admission(guard, std::marker::PhantomData)),
+            258 => Err("Another window is preparing a restart. Try again when it has finished.".into()),
+            _ => Err(format!("Cannot check app windows: {}", std::io::Error::last_os_error())),
+        }
+    }
     pub(super) fn instance(install: &Path, exclusive: bool) -> Result<Instance, String> {
         named_guard(install, "windows", exclusive)
     }
@@ -751,7 +859,7 @@ mod native {
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
         let error = unsafe { GetLastError() };
         if handle.is_null() { return Err(format!("Cannot reserve the app's update guard: {}", std::io::Error::from_raw_os_error(error as i32))); }
-        let guard = Instance(handle);
+        let guard = Instance(unsafe { OwnedHandle::from_raw_handle(handle) });
         if exclusive && error == 183 {
             return Err(if kind == "download" { "Another window is already preparing an update." } else { "Close every other 420P Label Studio window, including tray windows, before installing an update." }.into());
         }
@@ -803,9 +911,25 @@ mod native {
         if fields[0] != 0xFEEF04BD { return Err("Invalid Windows version signature.".into()); }
         Ok([fields[2] >> 16, fields[2] & 0xffff, fields[3] >> 16, fields[3] & 0xffff])
     }
-    pub(super) fn message(message: &str) {
-        #[link(name="user32")] unsafe extern "system" { fn MessageBoxW(window: Handle, text: *const u16, caption: *const u16, kind: u32) -> i32; }
+    #[link(name="user32")] unsafe extern "system" { fn MessageBoxW(window: Handle, text: *const u16, caption: *const u16, kind: u32) -> i32; }
+    fn dialog(message: &str, kind: u32) -> i32 {
         let text = wide(std::ffi::OsStr::new(message)); let title = wide(std::ffi::OsStr::new(crate::branding::APP_NAME));
-        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), 0x10); }
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), kind) }
+    }
+    pub(super) fn message(message: &str) { dialog(message, 0x10); }
+    pub(super) fn ask_recovery(folder: &Path, problem: &str) -> Result<bool, String> {
+        let text = format!("{problem}\n\nRecovery folder: {}\n\nYes — retry recovery after resolving the conflict.\nNo — open the recovery folder in Explorer.\nCancel — close Studio and keep the recovery files.", folder.display());
+        // Yes/No/Cancel with Cancel as the default, including Escape.
+        match dialog(&text, 0x233) {
+            6 => Ok(true),
+            7 => {
+                package::plain_directory(folder)?;
+                let explorer = PathBuf::from(std::env::var_os("SystemRoot").ok_or("Cannot locate Windows Explorer.")?).join("explorer.exe");
+                Command::new(explorer).arg(folder).spawn().map_err(|e| format!("Cannot open the recovery folder: {e}"))?;
+                Ok(false)
+            }
+            2 => Ok(false),
+            _ => Err(format!("Cannot display the recovery choices. Recovery folder: {}", folder.display())),
+        }
     }
 }

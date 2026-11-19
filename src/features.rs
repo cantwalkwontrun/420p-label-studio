@@ -7,6 +7,7 @@ use eframe::egui::{self, RichText};
 use serde_json::{Value, json};
 
 const MAX_OBJECTS: usize = 50;
+const MAX_STORED_TEXT_BYTES: usize = 16_384;
 const MAX_LABEL_MM: f64 = 2000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,6 +297,13 @@ impl Features {
         Ok(Value::Array(items))
     }
     /// Store editable state separately from the SDK's resolved geometry.
+    pub fn project_value(&self) -> Result<Value, String> {
+        if let Some(object) = self.objects.iter().find(|object| object.value.len() > MAX_STORED_TEXT_BYTES) {
+            return Err(format!("{} ({}) exceeds the {MAX_STORED_TEXT_BYTES}-byte project text limit. Shorten it before saving.", object.kind.label(), object.name));
+        }
+        Ok(self.save_value())
+    }
+
     pub fn save_value(&self) -> Value {
         Value::Array(self.objects.iter().map(|o| json!({"kind":o.kind.wire(),"name":o.name,"value":o.value,"variant":o.variant,"startAt":o.start_at,"increment":o.increment,"textWidth":o.text_width,"leadingZeros":o.leading_zeros,"captureAtPreview":o.capture_at_preview})).collect())
     }
@@ -323,7 +331,7 @@ impl Features {
             result.next_id = result.next_id.max(id);
             let mut object = Feature::new(kind, id);
             object.value = match item.get("value") { None => String::new(), Some(v) => v.as_str().ok_or("Invalid object text.")?.to_owned() };
-            if object.value.len() > 16_384 { return Err("Object text is too large.".into()); }
+            if object.value.len() > MAX_STORED_TEXT_BYTES { return Err("Object text is too large.".into()); }
             object.variant = match item.get("variant") { None => object.variant, Some(v) => v.as_str().filter(|s| s.len() <= 64).ok_or("Invalid object variant.")?.to_owned() };
             let number = |key: &str, default: i32| -> Result<i32, String> {
                 match item.get(key) { None => Ok(default), Some(v) => v.as_i64().and_then(|n| i32::try_from(n).ok()).ok_or_else(|| format!("Invalid {key}.")) }
@@ -407,6 +415,28 @@ impl Features {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn oversized_multibyte_draft_keeps_previous_project_until_shortened() {
+        let dir = crate::project_io::create_staging_dir(&std::env::temp_dir()).unwrap();
+        let path = dir.join("draft.420p");
+        let mut app = crate::LabelApp { template_path: "synthetic.dymo".into(), ..Default::default() };
+        app.features.add(FeatureKind::Address, 9).unwrap();
+        app.features.objects[0].value = "Original".into();
+        app.save_as(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let boundary = "é".repeat(MAX_STORED_TEXT_BYTES / 2);
+        app.features.objects[0].value = format!("{boundary}a");
+        assert!(app.save_current().unwrap_err().contains("Extra1"));
+        assert_ne!(app.document_key(), app.saved_key);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        app.features.objects[0].value = boundary.clone();
+        app.save_current().unwrap();
+        let mut reopened = crate::LabelApp::default();
+        reopened.load_project(&path).unwrap();
+        assert_eq!(reopened.features.objects[0].value, boundary);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
     #[test] fn saved_names_remain_stable_after_deletion() {
         let input = json!([{"kind":"shape","name":"Extra2","value":"","variant":"Rectangle"}]);
         let mut loaded = Features::load_value(&input, 9).unwrap();
